@@ -10,11 +10,14 @@ The output is a directed multigraph
 ---------
 
 .tsv expectations
-TYPE    NAME    COLOR   *args
+
+Header row:
+TYPE    NAME    COLOR   SHORTNAME   *args
 
 TYPE of entry: either Timeline, Event, or Character
 NAME of entry, globally unique within its TYPE
 COLOR to graph (optional)
+SHORTNAME for graph display (or timestamp for an Event)
 *args depend on the TYPE
 
 All Timelines are expected before any Events
@@ -31,11 +34,12 @@ must be globally unique among both Timeline and Place names:
 
 TYPE: Event
 Something that happened.
-:args (2 required)
-First, the name of the Timeline or Place where the event occurs
-    Placing an event on a Timeline acts as a simultaneity marker (cannot be accessed by characters)
-Second, an integer timestamp for ordering relative to the rest of the Timeline or Place
+:SHORTNAME Integer timestamp for ordering relative to the rest of the Timeline or Place
     Timestamps should be unique for each Place
+:args (1 required)
+Name of the Timeline or Place where the event occurs
+    Placing an event on a Timeline acts as a simultaneity marker
+    (cannot be directly accessed by characters)
 :
 
 TYPE: Character
@@ -60,7 +64,11 @@ class StoryElement(abc.ABC):
         assert s, f"No story connected with this element"
         assert name, f"Empty name"
         self.story = s
-        self.name = name
+        self.name = name.strip()
+        self.key: str = kwargs["key"] if kwargs.get("key") else self.name.lower()
+        self.short_name: str = kwargs["short_name"] if kwargs.get(
+            "short_name"
+        ) else self.name
         self.color = kwargs.get("color")
 
     @property
@@ -120,9 +128,15 @@ class Timeline(EventSequence):
     ):
         super().__init__(name, story, **kwargs)
         assert (
-            n := name.lower().strip()
-        ) not in story.line_list.keys(), f"{n} already is already a timeline or place"
-        story.line_list[n] = self
+            self.key not in story.line_list.keys()
+        ), f"{self.name} already is a timeline or place"
+        story.line_list[self.key] = self
+        x = story.line_list.get(self.short_name.lower())
+        assert (
+            x is None or x == self
+        ), f"{self.name} needs a unique short name ({self.short_name} in conflict)"
+        if not x:
+            story.line_list[self.short_name.lower()] = self
         self.ts: "Dict[int, Event]" = {}
         self.places: "Set[Place]" = set()
         if self.color is None:
@@ -152,10 +166,12 @@ class Timeline(EventSequence):
         self.ts[e.counter] = e
         if not push_copies:
             return
-        {
+        if e.sync_arrows is None:
+            e.sync_arrows = False
+        {  # noqa
             Event(f"{e.name}-{p.name}", p, e.counter, push_copies=False)
             for p in self.places
-        }
+        }  # noqa
 
 
 class Place(Timeline):
@@ -179,10 +195,15 @@ class Place(Timeline):
         :param push_copies: mirror over to the main timeline
         """
         super().add_event(e, d, push_copies=False)
-        if not push_copies or e.counter in self.timeline.ts.keys():
-            return
-        Event(
-            f"{self.timeline.name}-{e.counter}",
+        e.can_attend = True
+        if e.sync_arrows is None:
+            e.sync_arrows = push_copies
+        if not push_copies:
+            return  # don't create linking arrows on child events to reduce mess
+        if e.counter in self.timeline.ts.keys():
+            return  # another event is happening at the same time at another place
+        Event(  # synchronization event
+            f"{self.timeline.short_name}-{e.counter}",
             self.timeline,
             e.counter,
             push_copies=False,
@@ -194,14 +215,21 @@ class Place(Timeline):
 
 class Event(StoryElement):
     def __init__(
-        self, name: str, tl: Timeline, counter: int, push_copies: bool = True, **kwargs
+        self,
+        name: str,
+        tl: Timeline,
+        counter: int,
+        push_copies: bool = True,
+        sync_arrows: Optional[bool] = None,
+        **kwargs,
     ):
         super().__init__(name, tl.story, **kwargs)
         self.counter = counter
-        self.tl = tl
+        self.can_attend: bool = False  # changed to True in Place.add_event()
+        self.sync_arrows: bool = sync_arrows
         tl.add_event(self, push_copies=push_copies)
         self.attendees: "Set[Character]" = set()
-        self.can_attend: bool = True if isinstance(tl, Place) else False
+        self.tl = tl
 
     @property
     def roster(self) -> "Set[Character]":
@@ -261,23 +289,18 @@ class Storyboard(StoryElement):
         }
         if file:
             self.load_file(file)
+        self.graph = nx.MultiDiGraph()
 
     def load_file(self, file, /):
-        f = csv.reader(open(file, "r"), delimiter="\t")
+        f = csv.DictReader(open(file, "r"), delimiter="\t")
         for line in f:
-            if len(line) < 4:
-                continue
-            fn: Callable = self.line_loaders.get(line[0].upper().strip())
+            fn: Callable = self.line_loaders.get(line["TYPE"].upper().strip())
             if not fn:
                 click.echo(f"invalid line: {line}", err=True)
                 continue
-            name: str = line[1].strip()
-            if not name:
-                click.echo(f"Skipping nameless line", err=True)
-                continue
-            color: Optional[str] = line[2].strip() if line[2] else None
-            everything_else: List[str] = line[3:]
-            fn(name, *everything_else, color=color)
+            color: Optional[str] = line["COLOR"].strip() if line["COLOR"] else None
+            everything_else: List[str] = line.get(None, [])  # noqa
+            fn(line["NAME"], line["SHORTNAME"], *everything_else, color=color)
 
     @property
     def timelines(self) -> "Set[Timeline]":
@@ -308,36 +331,35 @@ class Storyboard(StoryElement):
         print(f"{len(self.event_list)} events")
         print(f"{len(self.dramatis_personae)} characters")
         print(f"{len(self.line_list)} timelines and places")
-        g: nx.MultiDiGraph = self.make_graph(leave_unfinished)
-        for v in self.event_list.values():
-            print(v)
+        # for e in self.event_list.values():
+        #     print(e.name, e.sync_arrows, e.can_attend)
+        print(self.graph)
 
     def make_graph(self, leave_unfinished: bool = False) -> nx.MultiDiGraph:
         if not self.is_final and not leave_unfinished:
             self.finalize()
-        g = nx.MultiDiGraph()
-        return g
+        return self.graph
 
     @property
     def roster(self) -> "Set[Character]":
         return self.dramatis_personae
 
-    def create_timeline(self, name: str, *places: str, **kwargs):
+    def create_timeline(self, name: str, short_name: str, *places: str, **kwargs):
         assert places, f"A timeline without places makes no sense"
-        t = Timeline(self, name, **kwargs)
+        t = Timeline(self, name, short_name=short_name, **kwargs)
         for p in places:
             Place(self, t, p, **kwargs)
         return t
 
-    def create_event(self, name: str, *args: str, **kwargs):
-        assert len(args) > 1, f"{args} lacks sufficient information to create an event"
+    def create_event(self, name: str, timestamp: str, *args: str, **kwargs):
+        assert args, f"Insufficient information to create an event: {name} {timestamp}"
         assert (
             tl := args[0].lower().strip()
         ) in self.line_list, f"{tl} isn't a real place"
-        return Event(name, self.line_list[tl], int(args[1]), **kwargs)
+        return Event(name, self.line_list[tl], int(timestamp), **kwargs)
 
-    def create_character(self, name: str, *events: str, **kwargs):
-        return Character(self, name, *events, **kwargs)
+    def create_character(self, name: str, short_name: str, *events: str, **kwargs):
+        return Character(self, name, *events, short_name=short_name, **kwargs)
 
 
 @click.command()
