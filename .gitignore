@@ -1,6 +1,12 @@
 # Input files
 *.tsv
 
+# Output files
+*.gml
+*.xml
+*.graphml
+*.gexf
+
 # Created by .ignore support plugin (hsz.mobi)
 ### TeX template
 ## Core latex/pdflatex auxiliary files:

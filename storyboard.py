@@ -29,7 +29,10 @@ A universe timeline.
 For extensive time-skips in the same universe (think of time travelers from
 the Clinton years visiting the mid-Triassic), it may be appropriate to consider
 distant past and far future to be different timelines, even if they are connected
-:args (at least 1 required) list of place names
+:args (at least 3 required)
+1. horizontal offset (integer), defaults to 0
+2. spacing (integer), defaults to 1
+3. list of place names
 must be globally unique among both Timeline and Place names:
 
 TYPE: Event
@@ -57,6 +60,7 @@ import csv
 from typing import *
 import abc
 import networkx as nx
+import matplotlib.pyplot as plt
 
 
 class StoryElement(abc.ABC):
@@ -119,6 +123,29 @@ class EventSequence(StoryElement):
             out |= event.roster
         return out
 
+    def make_edges(
+        self,
+        prefix: Optional[str] = None,
+        iterate_prefix: bool = True,
+        link_type: str = "Unknown",
+    ):
+        name: Optional[str] = self.name
+        if prefix and not iterate_prefix:
+            name = prefix
+        for i in range(len(self.events) - 1):
+            if prefix and iterate_prefix:
+                name = f"{prefix}-{i+1}"
+            self.story.graph.add_edge(
+                self.events[i],
+                self.events[i + 1],
+                dashed=self.dashed_links[i],
+                name=name,
+                key=self.story.edge_iterator,
+                color=self.color,
+                type=link_type,
+            )
+            self.story.edge_iterator += 1
+
 
 class Timeline(EventSequence):
     type = "Timeline"
@@ -173,6 +200,14 @@ class Timeline(EventSequence):
             for p in self.places
         }  # noqa
 
+    def make_edges(
+        self,
+        prefix: Optional[str] = None,
+        iterate_prefix: bool = True,
+        link_type: str = "Clock",
+    ):
+        return super().make_edges(prefix, iterate_prefix, link_type)
+
 
 class Place(Timeline):
     type = "Place"
@@ -211,6 +246,23 @@ class Place(Timeline):
 
     def __repr__(self):
         return f"Place {self.name}"
+
+    def make_edges(
+        self,
+        prefix: Optional[str] = None,
+        iterate_prefix: bool = True,
+        link_type: str = "History",
+    ):
+        super().make_edges(prefix, iterate_prefix, link_type)
+        for ts in self.ts.keys():
+            e: Event = self.ts[ts]
+            if not e.sync_arrows:
+                continue
+            stamp: Event = self.timeline.ts[ts]
+            ei: int = self.story.edge_iterator
+            self.story.graph.add_edge(e, stamp, type="Sync", key=ei)
+            self.story.graph.add_edge(stamp, e, type="Sync", key=ei + 1)
+            self.story.edge_iterator = ei + 2
 
 
 class Event(StoryElement):
@@ -270,6 +322,16 @@ class Character(EventSequence):
         # add yourself to the roster of the events you attend
         e.attendees.add(self)
 
+    def make_edges(
+        self,
+        prefix: Optional[str] = None,
+        iterate_prefix: bool = True,
+        link_type: str = "Character",
+    ):
+        if prefix is None:
+            prefix = self.short_name
+        super().make_edges(prefix, iterate_prefix, link_type)
+
 
 class Storyboard(StoryElement):
     def __init__(self, *, name: Optional[str] = None, file=None, **kwargs):
@@ -289,7 +351,11 @@ class Storyboard(StoryElement):
         }
         if file:
             self.load_file(file)
+        self.edge_iterator: int = 0
         self.graph = nx.MultiDiGraph()
+        self.node_positions: Dict[Event, Tuple[int, int]] = {}
+        self.display_ready: bool = False
+        self.v_scaling: int = kwargs.get("v_scale", 2)
 
     def load_file(self, file, /):
         f = csv.DictReader(open(file, "r"), delimiter="\t")
@@ -316,6 +382,8 @@ class Storyboard(StoryElement):
 
     def finalize(self):
         """Adds start/end events for better graph output"""
+        if self.is_final:
+            return
         for t in self.timelines:
             if not t.timestamps:
                 Event(f"empty_{t.name}_start", t, -1)
@@ -325,20 +393,34 @@ class Storyboard(StoryElement):
             Event(f"{t.name}_end", t, t.timestamps[-1] + 1)
         self.is_final = True
 
-    def output(self, leave_unfinished: bool = False):
-        if not self.is_final and not leave_unfinished:
-            self.finalize()
+    def output(self):
+        if not self.graph:
+            self.prep4display()
         print(f"{len(self.event_list)} events")
         print(f"{len(self.dramatis_personae)} characters")
         print(f"{len(self.line_list)} timelines and places")
-        # for e in self.event_list.values():
-        #     print(e.name, e.sync_arrows, e.can_attend)
-        print(self.graph)
+        nx.write_graphml(self.graph, f"{self.name}.graphml", infer_numeric_types=True)
+        nx.draw(self.graph)  # , self.node_positions)
+        plt.show()
 
     def make_graph(self, leave_unfinished: bool = False) -> nx.MultiDiGraph:
+        """Converts the loaded data into a graph"""
         if not self.is_final and not leave_unfinished:
             self.finalize()
+        for p in set(self.line_list.values()):
+            p.make_edges()
+        for c in self.dramatis_personae:
+            c.make_edges()
         return self.graph
+
+    def prep4display(self):
+        """Calculates the node positions for output"""
+        if not self.graph:
+            self.make_graph()
+        if self.display_ready:
+            return
+        # TODO make this work
+        self.display_ready = True
 
     @property
     def roster(self) -> "Set[Character]":
