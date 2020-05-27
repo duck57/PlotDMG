@@ -90,7 +90,7 @@ class EventSequence(StoryElement):
         name: str,
         s: "Storyboard",
         /,
-        es: "Optional[List[Event]]" = None,
+        es: "Optional[List[EventType]]" = None,
         dashed_links: List[bool] = None,
         dash_default: bool = False,
         **kwargs,
@@ -105,14 +105,14 @@ class EventSequence(StoryElement):
             self.dashed_links: List[bool] = []
 
     @property
-    def latest_event(self) -> "Event":
+    def latest_event(self) -> "EventType":
         return self.events[-1]
 
     @latest_event.setter
-    def latest_event(self, new_event: "Event"):
+    def latest_event(self, new_event: "EventType"):
         self.add_event(new_event, self.dash_by_default)
 
-    def add_event(self, e: "Event", d: bool = False):
+    def add_event(self, e: "EventType", d: bool = False):
         self.events.append(e)
         self.dashed_links.append(d)
 
@@ -147,41 +147,29 @@ class EventSequence(StoryElement):
             self.story.edge_iterator += 1
 
 
-class Timeline(EventSequence):
-    type = "Timeline"
-
-    def __init__(
-        self, story: "Storyboard", name: str, **kwargs,
-    ):
+class TimedEventSequence(EventSequence):
+    def __init__(self, name: str, story: "Storyboard", **kwargs):
         super().__init__(name, story, **kwargs)
         assert (
             self.key not in story.line_list.keys()
         ), f"{self.name} already is a timeline or place"
-        story.line_list[self.key] = self
-        x = story.line_list.get(self.short_name.lower())
         assert (
-            x is None or x == self
+            self.short_name.lower() not in story.line_list.keys()
         ), f"{self.name} needs a unique short name ({self.short_name} in conflict)"
-        if not x:
+        story.line_list[self.key] = self
+        if self.short_name.lower().strip() != self.key:
             story.line_list[self.short_name.lower()] = self
-        self.ts: "Dict[int, Event]" = {}
-        self.places: "Set[Place]" = set()
-        if self.color is None:
-            self.color = story.color
+        self.ts: "Dict[int, EventType]" = {}
+        self.v_pos: int = kwargs.get("v_pos", 0)
 
     @property
     def timestamps(self) -> "List[int]":
         """
-        This is here instead of in EventSequence because these timestamps would
-        make no sense on a Character that can cross multiple Timelines
         :return: a sorted list of timestamps for the events of a timeline
         """
         return sorted({e.counter for e in self.events})
 
-    def __repr__(self):
-        return f"Timeline {self.name}"
-
-    def add_event(self, e: "Event", d: bool = False, push_copies: bool = True):
+    def add_event(self, e: "EventType", d: bool = False):
         assert (
             e.counter not in self.ts.keys()
         ), f"There's already an event in {self} at {e.counter}"
@@ -191,104 +179,140 @@ class Timeline(EventSequence):
         self.story.event_list[n] = e
         super().add_event(e, d)
         self.ts[e.counter] = e
-        if not push_copies:
-            return
-        if e.sync_arrows is None:
-            e.sync_arrows = False
-        {  # noqa
-            Event(f"{e.name}-{p.name}", p, e.counter, push_copies=False)
-            for p in self.places
-        }  # noqa
 
-    def make_edges(
-        self,
-        prefix: Optional[str] = None,
-        iterate_prefix: bool = True,
-        link_type: str = "Clock",
+    def make_edges(self, link_type: str = "incomplete code error", **kwargs):
+        return super().make_edges(None, True, link_type)
+
+
+class Timeline(TimedEventSequence):
+    """
+    A world clock
+    """
+
+    def __init__(
+        self, story: "Storyboard", name: str, **kwargs,
     ):
-        return super().make_edges(prefix, iterate_prefix, link_type)
+        super().__init__(name, story, **kwargs)
+
+        self.places: "Set[Place]" = set()
+        if self.color is None:
+            self.color = story.color
+        self.scaling: int = int(kwargs["scaling"]) if kwargs.get("scaling") else 2
+        self.offset: int = int(kwargs["offset"]) if kwargs.get("offset") else 0
+        story.timelines.add(self)
+
+    def __repr__(self):
+        return f"Timeline {self.name}"
+
+    def make_edges(self, **kwargs):
+        return super().make_edges("Clock")
+
+    def position_events_h(self):
+        pass
 
 
-class Place(Timeline):
-    type = "Place"
+class Place(TimedEventSequence):
+    """
+    A sequence of events that happen in the same place
+    """
 
     def __init__(
         self, story: "Storyboard", tl: "Timeline", name: str, **kwargs,
     ):
-        super().__init__(story, name, **kwargs)
+        super().__init__(name, story, **kwargs)
         if self.color is None:
             self.color = tl.color
         self.dash_by_default = True
         self.timeline = tl
+        story.places.add(self)
         tl.places.add(self)
-
-    def add_event(self, e: "Event", d: bool = True, push_copies: bool = True):
-        """
-        Adds an event and also checks that it is unique in time
-        :param d: not used
-        :param e: the event to add
-        :param push_copies: mirror over to the main timeline
-        """
-        super().add_event(e, d, push_copies=False)
-        e.can_attend = True
-        if e.sync_arrows is None:
-            e.sync_arrows = push_copies
-        if not push_copies:
-            return  # don't create linking arrows on child events to reduce mess
-        if e.counter in self.timeline.ts.keys():
-            return  # another event is happening at the same time at another place
-        Event(  # synchronization event
-            f"{self.timeline.short_name}-{e.counter}",
-            self.timeline,
-            e.counter,
-            push_copies=False,
-        )
 
     def __repr__(self):
         return f"Place {self.name}"
 
-    def make_edges(
-        self,
-        prefix: Optional[str] = None,
-        iterate_prefix: bool = True,
-        link_type: str = "History",
-    ):
-        super().make_edges(prefix, iterate_prefix, link_type)
-        for ts in self.ts.keys():
-            e: Event = self.ts[ts]
-            if not e.sync_arrows:
-                continue
-            stamp: Event = self.timeline.ts[ts]
-            ei: int = self.story.edge_iterator
-            self.story.graph.add_edge(e, stamp, type="Sync", key=ei)
-            self.story.graph.add_edge(stamp, e, type="Sync", key=ei + 1)
-            self.story.edge_iterator = ei + 2
+    def make_edges(self, **kwargs):
+        super().make_edges("History")
 
 
-class Event(StoryElement):
+class EventBase(StoryElement):
+    can_attend: bool
+
     def __init__(
-        self,
-        name: str,
-        tl: Timeline,
-        counter: int,
-        push_copies: bool = True,
-        sync_arrows: Optional[bool] = None,
-        **kwargs,
+        self, name: str, tl: "LineType", counter: int, **kwargs,
     ):
+        """
+        :param name: (Unique) name of event
+        :param tl: Line of the event
+        :param counter: When did it happen?
+        :param kwargs: other stuff
+        """
         super().__init__(name, tl.story, **kwargs)
+        self.name = name
+        self.line = tl
         self.counter = counter
-        self.can_attend: bool = False  # changed to True in Place.add_event()
-        self.sync_arrows: bool = sync_arrows
-        tl.add_event(self, push_copies=push_copies)
+        self.line.add_event(self)
         self.attendees: "Set[Character]" = set()
-        self.tl = tl
+
+    @property
+    def pos(self) -> Tuple[int, int]:
+        return self.counter, self.line.v_pos
+
+    def __repr__(self):
+        return f"Event {self.name} at {self.counter} in {self.line}"
 
     @property
     def roster(self) -> "Set[Character]":
         return self.attendees
 
-    def __repr__(self):
-        return f"Event {self.name} at {self.counter} in {self.tl}"
+
+class EventAnchor(EventBase):
+    """
+    "Events" on a Timeline for time synchronization
+    """
+
+    can_attend = False
+
+    def __init__(
+        self, name: str, tl: Timeline, counter: int, make_related: bool = True, **kwargs
+    ):
+        super().__init__(name, tl, counter, **kwargs)
+        self.draw_sync_lines: bool = not make_related
+        if make_related:
+            {Event(f"{name}-{p.name}", p, counter) for p in tl.places}  # noqa  # noqa
+
+    @property
+    def child_events(self) -> "Set[Event]":
+        return {
+            p.ts[self.counter] for p in self.line.places if self.counter in p.ts.keys()
+        }
+
+
+class Event(EventBase):
+    """
+    Events in a Place that characters can attend
+    """
+
+    can_attend = True
+
+    def __init__(
+        self, name: str, tl: Place, counter: int, **kwargs,
+    ):
+        super().__init__(name, tl, counter, **kwargs)
+        self.anchor = (
+            tl.timeline.ts[counter]
+            if counter in tl.timeline.ts.keys()
+            else EventAnchor(
+                f"{self.line.short_name}-{counter}",
+                self.line.timeline,
+                counter,
+                False,
+                **kwargs,
+            )
+        )
+
+
+EventType = TypeVar("EventType", bound=EventBase)
+LineType = TypeVar("LineType", bound=TimedEventSequence)
 
 
 class Character(EventSequence):
@@ -334,13 +358,21 @@ class Character(EventSequence):
 
 
 class Storyboard(StoryElement):
-    def __init__(self, *, name: Optional[str] = None, file=None, **kwargs):
+    def __init__(
+        self,
+        *,
+        name: Optional[str] = None,
+        file=None,
+        load_final: bool = True,
+        **kwargs,
+    ):
         assert name or file, f"Need a name or a file to load from"
         if not name:
             name = file.split(".tsv")[0]
         super().__init__(name, self, **kwargs)
 
-        self.line_list: Dict[str, Timeline] = {}
+        # set up all the blank variables
+        self.line_list: Dict[str, LineType] = {}
         self.event_list: Dict[str, Event] = {}
         self.dramatis_personae: Set[Character] = set()
         self.is_final: bool = False
@@ -349,13 +381,19 @@ class Storyboard(StoryElement):
             "EVENT": self.create_event,
             "CHARACTER": self.create_character,
         }
-        if file:
-            self.load_file(file)
         self.edge_iterator: int = 0
         self.graph = nx.MultiDiGraph()
-        self.node_positions: Dict[Event, Tuple[int, int]] = {}
         self.display_ready: bool = False
-        self.v_scaling: int = kwargs.get("v_scale", 2)
+        self.v_scaling: int = kwargs.get("v_scale", 1)
+        self.v_count: int = 0
+        self.timelines: Set[Timeline] = set()
+        self.places: Set[Place] = set()
+
+        if not file:
+            return
+        self.load_file(file)
+        if load_final:
+            pass  # TODO finalize, generate graph
 
     def load_file(self, file, /):
         f = csv.DictReader(open(file, "r"), delimiter="\t")
@@ -369,14 +407,6 @@ class Storyboard(StoryElement):
             fn(line["NAME"], line["SHORTNAME"], *everything_else, color=color)
 
     @property
-    def timelines(self) -> "Set[Timeline]":
-        return {t for t in self.line_list.values() if not isinstance(t, Place)}
-
-    @property
-    def places(self) -> "Set[Place]":
-        return {p for p in self.line_list.values() if isinstance(p, Place)}
-
-    @property
     def nested_lines(self) -> "Dict[Timeline, Set[Place]]":
         return {t: t.places for t in self.timelines}
 
@@ -386,11 +416,11 @@ class Storyboard(StoryElement):
             return
         for t in self.timelines:
             if not t.timestamps:
-                Event(f"empty_{t.name}_start", t, -1)
-                Event(f"empty_{t.name}_end", t, 1)
+                EventAnchor(f"empty_{t.name}_start", t, -1)
+                EventAnchor(f"empty_{t.name}_end", t, 1)
                 continue
-            Event(f"{t.name}_start", t, t.timestamps[0] - 1)
-            Event(f"{t.name}_end", t, t.timestamps[-1] + 1)
+            EventAnchor(f"{t.name}_start", t, t.timestamps[0] - 1)
+            EventAnchor(f"{t.name}_end", t, t.timestamps[-1] + 1)
         self.is_final = True
 
     def output(self):
@@ -400,8 +430,10 @@ class Storyboard(StoryElement):
         print(f"{len(self.dramatis_personae)} characters")
         print(f"{len(self.line_list)} timelines and places")
         nx.write_graphml(self.graph, f"{self.name}.graphml", infer_numeric_types=True)
-        nx.draw(self.graph)  # , self.node_positions)
-        plt.show()
+        # nx.write_gexf(self.graph, f"{self.name}.gexf")
+        nx.draw_networkx(self.graph, {n: n.pos for n in self.event_list.values()})
+        plt.savefig(f"{self.name}.png")
+        plt.savefig(f"{self.name}.svg")
 
     def make_graph(self, leave_unfinished: bool = False) -> nx.MultiDiGraph:
         """Converts the loaded data into a graph"""
@@ -419,7 +451,7 @@ class Storyboard(StoryElement):
             self.make_graph()
         if self.display_ready:
             return
-        # TODO make this work
+        # calculate the horizontal positions of each node
         self.display_ready = True
 
     @property
@@ -427,18 +459,37 @@ class Storyboard(StoryElement):
         return self.dramatis_personae
 
     def create_timeline(self, name: str, short_name: str, *places: str, **kwargs):
-        assert places, f"A timeline without places makes no sense"
-        t = Timeline(self, name, short_name=short_name, **kwargs)
-        for p in places:
-            Place(self, t, p, **kwargs)
+        assert len(places) > 1, f"A timeline without places makes no sense"
+        t = Timeline(
+            self,
+            name if places[2:] else f"{name}-tl",
+            short_name=short_name,
+            scaling=places[0],
+            offset=places[1],
+            v_pos=self.v_count,
+            **kwargs,
+        )
+        if not places[2:]:  # single-place timelines
+            Place(self, t, name, v_pos=self.v_count, **kwargs)
+            self.v_count -= self.v_scaling
+        for p in places[2:]:
+            Place(self, t, p, v_pos=self.v_count, **kwargs)
+            self.v_count -= self.v_scaling
+        t.v_pos = self.v_count
+        self.v_count -= self.v_scaling * 2
         return t
 
     def create_event(self, name: str, timestamp: str, *args: str, **kwargs):
         assert args, f"Insufficient information to create an event: {name} {timestamp}"
         assert (
             tl := args[0].lower().strip()
-        ) in self.line_list, f"{tl} isn't a real place"
-        return Event(name, self.line_list[tl], int(timestamp), **kwargs)
+        ) in self.line_list.keys(), f"{tl} isn't a real place"
+        line = self.line_list[tl]
+        return (
+            Event(name, line, int(timestamp), **kwargs)
+            if isinstance(line, Place)
+            else EventAnchor(name, line, int(timestamp), **kwargs)
+        )
 
     def create_character(self, name: str, short_name: str, *events: str, **kwargs):
         return Character(self, name, *events, short_name=short_name, **kwargs)

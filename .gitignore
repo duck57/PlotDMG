@@ -6,6 +6,8 @@
 *.xml
 *.graphml
 *.gexf
+*.png
+*.svg
 
 # Created by .ignore support plugin (hsz.mobi)
 ### TeX template
