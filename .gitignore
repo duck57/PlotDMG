@@ -1,5 +1,6 @@
 # Input files
 *.tsv
+!examples/*.tsv
 
 # Output files
 *.gml
@@ -8,6 +9,7 @@
 *.gexf
 *.png
 *.svg
+*.gv*
 
 # Created by .ignore support plugin (hsz.mobi)
 ### TeX template

@@ -1,4 +1,2 @@
-click
-black
-networkx
-matplotlib
+click~=7.1.2
+graphviz~=0.14

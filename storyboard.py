@@ -59,8 +59,7 @@ import click
 import csv
 from typing import *
 import abc
-import networkx as nx
-import matplotlib.pyplot as plt
+import graphviz as gv
 
 
 class StoryElement(abc.ABC):
@@ -102,7 +101,7 @@ class EventSequence(StoryElement):
             assert len(dashed_links) >= len(es) - 1
             self.dashed_links = dashed_links
         else:
-            self.dashed_links: List[bool] = []
+            self.dashed_links: List[bool] = [dash_default]
 
     @property
     def latest_event(self) -> "EventType":
@@ -125,26 +124,52 @@ class EventSequence(StoryElement):
 
     def make_edges(
         self,
-        prefix: Optional[str] = None,
+        g: gv.Digraph,
+        /,
+        *,
+        show_name: bool = True,
         iterate_prefix: bool = True,
-        link_type: str = "Unknown",
-    ):
-        name: Optional[str] = self.name
-        if prefix and not iterate_prefix:
-            name = prefix
-        for i in range(len(self.events) - 1):
-            if prefix and iterate_prefix:
-                name = f"{prefix}-{i+1}"
-            self.story.graph.add_edge(
-                self.events[i],
-                self.events[i + 1],
-                dashed=self.dashed_links[i],
-                name=name,
-                key=self.story.edge_iterator,
-                color=self.color,
-                type=link_type,
+        start_node: Optional[str] = None,
+        end_node: Optional[str] = None,
+        use_color: bool = True,
+        **junk_args,
+    ) -> None:
+        if (not self.events or not self.dashed_links) and (
+            not start_node or not end_node
+        ):
+            return  # Nothing to display
+
+        def attrs_d() -> Dict[str, str]:
+            r: Dict[str, str] = {}
+            if use_color:
+                r["color"] = self.color
+            if junk_args.get("style"):
+                r["style"] = junk_args["style"]
+            return r
+
+        if start_node:
+            g.edge(
+                start_node,
+                self.events[0].node_name if self.events else end_node,
+                self.name if show_name else None,
+                **attrs_d(),
             )
-            self.story.edge_iterator += 1
+        for i in range(len(self.events)):
+            attrs: Dict[str, str] = attrs_d()
+            if not i:
+                continue  # can't draw a line from the previous node
+            if show_name:
+                attrs["label"] = self.short_name + (f"-{i}" if iterate_prefix else "")
+            if self.dashed_links[i]:
+                attrs["style"] = "dashed"
+            g.edge(self.events[i - 1].node_name, self.events[i].node_name, **attrs)
+        if end_node and self.events:
+            g.edge(
+                self.events[-1].node_name,
+                end_node,
+                self.name if show_name else None,
+                **attrs_d(),
+            )
 
 
 class TimedEventSequence(EventSequence):
@@ -169,6 +194,10 @@ class TimedEventSequence(EventSequence):
         """
         return sorted({e.counter for e in self.events})
 
+    def sort_events(self) -> None:
+        """Sorts the event sequence into chronological order"""
+        self.events.sort(key=Event.event_key)
+
     def add_event(self, e: "EventType", d: bool = False):
         assert (
             e.counter not in self.ts.keys()
@@ -179,9 +208,6 @@ class TimedEventSequence(EventSequence):
         self.story.event_list[n] = e
         super().add_event(e, d)
         self.ts[e.counter] = e
-
-    def make_edges(self, link_type: str = "incomplete code error", **kwargs):
-        return super().make_edges(None, True, link_type)
 
 
 class Timeline(TimedEventSequence):
@@ -197,18 +223,61 @@ class Timeline(TimedEventSequence):
         self.places: "Set[Place]" = set()
         if self.color is None:
             self.color = story.color
-        self.scaling: int = int(kwargs["scaling"]) if kwargs.get("scaling") else 2
-        self.offset: int = int(kwargs["offset"]) if kwargs.get("offset") else 0
         story.timelines.add(self)
 
     def __repr__(self):
         return f"Timeline {self.name}"
 
-    def make_edges(self, **kwargs):
-        return super().make_edges("Clock")
-
-    def position_events_h(self):
-        pass
+    def make_graph(
+        self,
+        *,
+        universal_clock: bool = True,
+        start_stop: bool = True,
+        only_one: bool = False,
+    ) -> gv.Digraph:
+        g = gv.Digraph(("" if only_one else "cluster-") + self.name)
+        g.attr(compound="True")
+        if not only_one:
+            g.attr(label=self.name)
+        g.attr(color=self.color)
+        time_slices: List[gv.Digraph] = [e.make_cluster() for e in self.events]
+        for i in range(len(time_slices)):
+            g.subgraph(time_slices[i])
+            if not i or not universal_clock:
+                continue  # there needs to be a previous time for the link to work
+            g.edge(
+                self.events[i - 1].node_name,
+                self.events[i].node_name,
+                minlen="1",
+                ltail=time_slices[i - 1].name,
+                lhead=time_slices[i].name,
+                color=self.color,
+                label=f"{self.short_name}-{i}",
+                style="bold",
+            )
+        if start_stop:
+            start: str = "Start" if only_one else f"{self.short_name}\nstart"
+            stop: str = "End" if only_one else f"{self.short_name}\nfinish"
+            g.node(start, shape="star", color=self.color)
+            g.node(stop, shape="tripleoctagon", color=self.color)
+            g.edge(
+                start,
+                self.events[0].node_name if self.events else stop,
+                lhead=time_slices[0].name if self.events else None,
+                color=self.color,
+                style="bold",
+            )
+            if self.events:
+                g.edge(
+                    self.events[-1].node_name,
+                    stop,
+                    ltail=time_slices[-1].name,
+                    color=self.color,
+                    style="bold",
+                )
+        for p in self.places:
+            p.make_edges(g)
+        return g
 
 
 class Place(TimedEventSequence):
@@ -230,8 +299,37 @@ class Place(TimedEventSequence):
     def __repr__(self):
         return f"Place {self.name}"
 
-    def make_edges(self, **kwargs):
-        super().make_edges("History")
+    def make_edges(
+        self,
+        g: gv.Digraph,
+        /,
+        *,
+        show_name: bool = True,
+        iterate_prefix: bool = False,
+        start_node: Optional[str] = True,
+        end_node: Optional[str] = True,
+        use_color: bool = False,
+        **junk_args,
+    ) -> None:
+        if start_node == True:  # noqa
+            start_node = f"{self.short_name}\nstart"
+        if end_node == True:  # noqa
+            end_node = f"{self.short_name}\nfinish"
+        if start_node:
+            g.node(start_node, shape="invtrapezium")
+        if end_node:
+            g.node(end_node, shape="octagon")
+            g.node(end_node, shape="octagon")
+        return super().make_edges(
+            g,
+            show_name=show_name,
+            iterate_prefix=iterate_prefix,
+            start_node=start_node,
+            end_node=end_node,
+            use_color=use_color,
+            style="dotted",
+            **junk_args,
+        )  # is there a better way to do this?
 
 
 class EventBase(StoryElement):
@@ -264,6 +362,14 @@ class EventBase(StoryElement):
     def roster(self) -> "Set[Character]":
         return self.attendees
 
+    @property
+    def node_name(self) -> str:
+        return self.name.replace("-", "\n")
+
+    @classmethod
+    def event_key(cls, e: "EventType") -> int:
+        return e.counter
+
 
 class EventAnchor(EventBase):
     """
@@ -285,6 +391,15 @@ class EventAnchor(EventBase):
         return {
             p.ts[self.counter] for p in self.line.places if self.counter in p.ts.keys()
         }
+
+    def make_cluster(self) -> gv.Digraph:
+        c = gv.Digraph(
+            name=f"cluster-{self.counter}", graph_attr={"label": f"{self.counter}"}
+        )
+        for v in self.child_events:
+            c.node(v.node_name)
+        c.node(self.node_name, shape="point", style="invis")
+        return c
 
 
 class Event(EventBase):
@@ -346,16 +461,6 @@ class Character(EventSequence):
         # add yourself to the roster of the events you attend
         e.attendees.add(self)
 
-    def make_edges(
-        self,
-        prefix: Optional[str] = None,
-        iterate_prefix: bool = True,
-        link_type: str = "Character",
-    ):
-        if prefix is None:
-            prefix = self.short_name
-        super().make_edges(prefix, iterate_prefix, link_type)
-
 
 class Storyboard(StoryElement):
     def __init__(
@@ -382,10 +487,8 @@ class Storyboard(StoryElement):
             "CHARACTER": self.create_character,
         }
         self.edge_iterator: int = 0
-        self.graph = nx.MultiDiGraph()
-        self.display_ready: bool = False
-        self.v_scaling: int = kwargs.get("v_scale", 1)
-        self.v_count: int = 0
+        self.graph = gv.Digraph(name=self.name)
+        self.graph.attr(compound="True")
         self.timelines: Set[Timeline] = set()
         self.places: Set[Place] = set()
 
@@ -393,7 +496,8 @@ class Storyboard(StoryElement):
             return
         self.load_file(file)
         if load_final:
-            pass  # TODO finalize, generate graph
+            self.finalize()
+            self.make_graph()
 
     def load_file(self, file, /):
         f = csv.DictReader(open(file, "r"), delimiter="\t")
@@ -414,45 +518,30 @@ class Storyboard(StoryElement):
         """Adds start/end events for better graph output"""
         if self.is_final:
             return
-        for t in self.timelines:
-            if not t.timestamps:
-                EventAnchor(f"empty_{t.name}_start", t, -1)
-                EventAnchor(f"empty_{t.name}_end", t, 1)
-                continue
-            EventAnchor(f"{t.name}_start", t, t.timestamps[0] - 1)
-            EventAnchor(f"{t.name}_end", t, t.timestamps[-1] + 1)
+        for t in self.line_list.values():
+            t.sort_events()
         self.is_final = True
 
     def output(self):
-        if not self.graph:
-            self.prep4display()
-        print(f"{len(self.event_list)} events")
-        print(f"{len(self.dramatis_personae)} characters")
-        print(f"{len(self.line_list)} timelines and places")
-        nx.write_graphml(self.graph, f"{self.name}.graphml", infer_numeric_types=True)
-        # nx.write_gexf(self.graph, f"{self.name}.gexf")
-        nx.draw_networkx(self.graph, {n: n.pos for n in self.event_list.values()})
-        plt.savefig(f"{self.name}.png")
-        plt.savefig(f"{self.name}.svg")
-
-    def make_graph(self, leave_unfinished: bool = False) -> nx.MultiDiGraph:
-        """Converts the loaded data into a graph"""
-        if not self.is_final and not leave_unfinished:
+        if not self.is_final:
             self.finalize()
-        for p in set(self.line_list.values()):
-            p.make_edges()
-        for c in self.dramatis_personae:
-            c.make_edges()
-        return self.graph
-
-    def prep4display(self):
-        """Calculates the node positions for output"""
-        if not self.graph:
             self.make_graph()
-        if self.display_ready:
-            return
-        # calculate the horizontal positions of each node
-        self.display_ready = True
+        click.echo(f"{len(self.event_list)} events")
+        click.echo(f"{len(self.dramatis_personae)} characters")
+        click.echo(f"{len(self.line_list)} timelines and places")
+        self.graph.view(quiet_view=True)
+
+    def make_graph(self) -> gv.Digraph:
+        """Converts the loaded data into a graph"""
+        # 1. create timelines
+        for t in self.timelines:
+            self.graph.subgraph(
+                t.make_graph(only_one=True if len(self.timelines) < 2 else False)
+            )
+        # 2. add characters
+        for c in self.dramatis_personae:
+            c.make_edges(self.graph)
+        return self.graph
 
     @property
     def roster(self) -> "Set[Character]":
@@ -466,17 +555,12 @@ class Storyboard(StoryElement):
             short_name=short_name,
             scaling=places[0],
             offset=places[1],
-            v_pos=self.v_count,
             **kwargs,
         )
         if not places[2:]:  # single-place timelines
-            Place(self, t, name, v_pos=self.v_count, **kwargs)
-            self.v_count -= self.v_scaling
+            Place(self, t, name, **kwargs)
         for p in places[2:]:
-            Place(self, t, p, v_pos=self.v_count, **kwargs)
-            self.v_count -= self.v_scaling
-        t.v_pos = self.v_count
-        self.v_count -= self.v_scaling * 2
+            Place(self, t, p, **kwargs)
         return t
 
     def create_event(self, name: str, timestamp: str, *args: str, **kwargs):
