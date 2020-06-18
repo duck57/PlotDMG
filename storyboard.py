@@ -485,6 +485,7 @@ class Storyboard(StoryElement):
             "TIMELINE": self.create_timeline,
             "EVENT": self.create_event,
             "CHARACTER": self.create_character,
+            "COMMENT": self.comment,
         }
         self.edge_iterator: int = 0
         self.graph = gv.Digraph(name=self.name)
@@ -577,6 +578,11 @@ class Storyboard(StoryElement):
 
     def create_character(self, name: str, short_name: str, *events: str, **kwargs):
         return Character(self, name, *events, short_name=short_name, **kwargs)
+
+    @staticmethod
+    def comment(*args, **kwargs):
+        """Skips a comment without throwing an error"""
+        pass
 
 
 @click.command()
