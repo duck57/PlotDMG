@@ -503,6 +503,8 @@ class Storyboard(StoryElement):
     def load_file(self, file, /):
         f = csv.DictReader(open(file, "r"), delimiter="\t")
         for line in f:
+            if not line["TYPE"]:
+                continue  # skip blank lines without throwing an error
             fn: Callable = self.line_loaders.get(line["TYPE"].upper().strip())
             if not fn:
                 click.echo(f"invalid line: {line}", err=True)

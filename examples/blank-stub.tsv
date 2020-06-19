@@ -1,0 +1,8 @@
+TYPE	NAME	COLOR	SHORTNAME
+Comment	Begin lines with 'comment\t' for a safe comment experience
+COMMENT	Lines that aren't formed to expectation will not halt the program but will throw errors to stderr
+comment	The accepted values for TYPE are "Comment", "Event", "Timeline", and "Character"
+Comment	In general, it is best to order the input file so the order is Timelines > Events > Characters.
+Comment This ordering is not enforced, but breaking it increases the likeihood of a failure to parse due to missing reference.
+Comment	See the module docstring for storyboard.py for further format details
+
