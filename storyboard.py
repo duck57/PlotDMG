@@ -60,6 +60,8 @@ import csv
 from typing import *
 import abc
 import graphviz as gv
+from collections import Counter, namedtuple
+from defaultlist import defaultlist
 
 
 class StoryElement(abc.ABC):
@@ -89,31 +91,48 @@ class EventSequence(StoryElement):
         name: str,
         s: "Storyboard",
         /,
-        es: "Optional[List[EventType]]" = None,
+        es: "List[EventType]" = None,
         dashed_links: List[bool] = None,
         dash_default: bool = False,
         **kwargs,
     ):
         super().__init__(name, s, **kwargs)
-        self.events = es if es else []
+        self.e_lst: "List[EventInSequence]" = []
         self.dash_by_default = dash_default
-        if dashed_links and es:
-            assert len(dashed_links) >= len(es) - 1
-            self.dashed_links = dashed_links
-        else:
-            self.dashed_links: List[bool] = [dash_default]
+        if es:
+            self.add_event_list(es, dashed_links)
+
+    @property
+    def events(self) -> "List[EventType]":
+        return [e[0] for e in self.e_lst]
 
     @property
     def latest_event(self) -> "EventType":
-        return self.events[-1]
+        return self.e_lst[-1][0]
 
     @latest_event.setter
     def latest_event(self, new_event: "EventType"):
-        self.add_event(new_event, self.dash_by_default)
+        self.add_event(new_event, self.dash_by_default, self.dash_by_default)
 
-    def add_event(self, e: "EventType", d: bool = False):
-        self.events.append(e)
-        self.dashed_links.append(d)
+    def add_event_list(
+        self, e: "List[EventType]", dashed_links: Optional[List[bool]] = None
+    ):
+        dash = defaultlist(lambda: self.dash_by_default)
+        if dashed_links:
+            for i, b in enumerate(dashed_links):
+                dash[i] = b
+        for j in range(len(e)):
+            self.add_event(e[j], dash[j - 1], dash[j])
+
+    def add_event(self, e: "EventType", dash_b4: bool = False, dash_next: bool = False):
+        self.e_lst.append(EventInSequence(e, dash_b4, dash_next))
+
+    @property
+    def dash_list(self) -> List[bool]:
+        return [self.dash_by_default] + [
+            (self.e_lst[i - 1].dash_to_next or self.e_lst[i].dash_from_previous)
+            for i in range(1, len(self.e_lst))
+        ]
 
     @property
     def roster(self) -> "Set[Character]":
@@ -132,19 +151,15 @@ class EventSequence(StoryElement):
         start_node: Optional[str] = None,
         end_node: Optional[str] = None,
         use_color: bool = True,
-        **junk_args,
+        **attrs,
     ) -> None:
-        if (not self.events or not self.dashed_links) and (
-            not start_node or not end_node
-        ):
+        if (not self.e_lst) and (not start_node or not end_node):
             return  # Nothing to display
 
         def attrs_d() -> Dict[str, str]:
-            r: Dict[str, str] = {}
+            r: Dict[str, str] = attrs
             if use_color:
                 r["color"] = self.color
-            if junk_args.get("style"):
-                r["style"] = junk_args["style"]
             return r
 
         if start_node:
@@ -154,15 +169,13 @@ class EventSequence(StoryElement):
                 self.name if show_name else None,
                 **attrs_d(),
             )
-        for i in range(len(self.events)):
-            attrs: Dict[str, str] = attrs_d()
-            if not i:
-                continue  # can't draw a line from the previous node
-            if show_name:
-                attrs["label"] = self.short_name + (f"-{i}" if iterate_prefix else "")
-            if self.dashed_links[i]:
-                attrs["style"] = "dashed"
-            g.edge(self.events[i - 1].node_name, self.events[i].node_name, **attrs)
+        att: Dict[str, str] = attrs_d()
+        att["show_name"] = str(show_name)
+        att["line_name"] = self.short_name
+        att["show_number"] = str(iterate_prefix)
+        for i in range(1, len(self.e_lst)):
+            att["sequence_suffix"] = f"-{i}"
+            self.link2events(g, self.e_lst[i - 1], self.e_lst[i], **att)
         if end_node and self.events:
             g.edge(
                 self.events[-1].node_name,
@@ -170,6 +183,33 @@ class EventSequence(StoryElement):
                 self.name if show_name else None,
                 **attrs_d(),
             )
+
+    @staticmethod
+    def link2events(
+        g: gv.Digraph, /, past: "EventInSequence", future: "EventInSequence", **attrs
+    ):
+        if not attrs.get("style"):
+            if past.dash_to_next or future.dash_from_previous:
+                attrs["style"] = "dashed"
+        if attrs["show_name"] == "True":
+            attrs["label"] = attrs["line_name"] + (
+                attrs["sequence_suffix"] if attrs["show_number"] == "True" else ""
+            )
+        g.edge(past.node_name, future.node_name, **attrs)
+
+
+class EventInSequence(NamedTuple):
+    event: "EventType"
+    dash_from_previous: bool
+    dash_to_next: bool
+
+    @property
+    def counter(self) -> int:
+        return self.event.counter
+
+    @property
+    def node_name(self) -> str:
+        return self.event.node_name
 
 
 class TimedEventSequence(EventSequence):
@@ -196,9 +236,13 @@ class TimedEventSequence(EventSequence):
 
     def sort_events(self) -> None:
         """Sorts the event sequence into chronological order"""
-        self.events.sort(key=Event.event_key)
+        self.e_lst.sort(key=TimedEventSequence.time_key)
 
-    def add_event(self, e: "EventType", d: bool = False):
+    @classmethod
+    def time_key(cls, x: "Tuple[EventType, bool, bool]") -> int:
+        return x[0].counter
+
+    def add_event(self, e: "EventType", dash_b4: bool = True, dash_next: bool = True):
         assert (
             e.counter not in self.ts.keys()
         ), f"There's already an event in {self} at {e.counter}"
@@ -206,7 +250,7 @@ class TimedEventSequence(EventSequence):
             n := e.name.lower().strip()
         ) not in self.story.event_list.keys(), f"Event {n.upper()} already happened"
         self.story.event_list[n] = e
-        super().add_event(e, d)
+        super().add_event(e, dash_b4, dash_next)
         self.ts[e.counter] = e
 
 
@@ -254,6 +298,7 @@ class Timeline(TimedEventSequence):
                 color=self.color,
                 label=f"{self.short_name}-{i}",
                 style="bold",
+                arrowhead="vee",
             )
         if start_stop:
             start: str = "Start" if only_one else f"{self.short_name}\nstart"
@@ -304,12 +349,12 @@ class Place(TimedEventSequence):
         g: gv.Digraph,
         /,
         *,
-        show_name: bool = True,
+        show_name: bool = False,
         iterate_prefix: bool = False,
         start_node: Optional[str] = True,
         end_node: Optional[str] = True,
         use_color: bool = False,
-        **junk_args,
+        **forced_attrs,
     ) -> None:
         if start_node == True:  # noqa
             start_node = f"{self.short_name}\nstart"
@@ -328,7 +373,8 @@ class Place(TimedEventSequence):
             end_node=end_node,
             use_color=use_color,
             style="dotted",
-            **junk_args,
+            arrowhead="onormal",
+            **forced_attrs,
         )  # is there a better way to do this?
 
 
@@ -349,18 +395,24 @@ class EventBase(StoryElement):
         self.line = tl
         self.counter = counter
         self.line.add_event(self)
-        self.attendees: "Set[Character]" = set()
+        self.attendees: "Counter[Character, int]" = Counter()
+        self.entrances: "Set[Character]" = set()
+        self.exits: "Set[Character]" = set()
 
     @property
     def pos(self) -> Tuple[int, int]:
         return self.counter, self.line.v_pos
+
+    @property
+    def loopers(self) -> "Set[Character]":
+        return {k for (k, v) in self.attendees.items() if v > 1}
 
     def __repr__(self):
         return f"Event {self.name} at {self.counter} in {self.line}"
 
     @property
     def roster(self) -> "Set[Character]":
-        return self.attendees
+        return set(self.attendees)
 
     @property
     def node_name(self) -> str:
@@ -369,6 +421,9 @@ class EventBase(StoryElement):
     @classmethod
     def event_key(cls, e: "EventType") -> int:
         return e.counter
+
+    def add_character(self, c: "Character", /):
+        self.attendees[c] += 1
 
 
 class EventAnchor(EventBase):
@@ -382,7 +437,6 @@ class EventAnchor(EventBase):
         self, name: str, tl: Timeline, counter: int, make_related: bool = True, **kwargs
     ):
         super().__init__(name, tl, counter, **kwargs)
-        self.draw_sync_lines: bool = not make_related
         if make_related:
             {Event(f"{name}-{p.name}", p, counter) for p in tl.places}  # noqa  # noqa
 
@@ -425,6 +479,10 @@ class Event(EventBase):
             )
         )
 
+    def add_character(self, c: "Character", /):
+        super().add_character(c)
+        self.anchor.add_character(c)
+
 
 EventType = TypeVar("EventType", bound=EventBase)
 LineType = TypeVar("LineType", bound=TimedEventSequence)
@@ -443,23 +501,24 @@ class Character(EventSequence):
                 e = e[:-2]
             if dash_previous:
                 e = e[2:]
-                self.dashed_links[-1] = True
-            self.add_event(s.event_list[e], dash_next)
-        if self.color is None:
-            self.color = s.color
+            self.add_event(s.event_list[e], dash_previous, dash_next)
+        if self.events:
+            self.events[0].entrances.add(self)
+            self.latest_event.exits.add(self)
 
     def __repr__(self):
         return f"Character {self.name}"
 
     @property
     def roster(self) -> "Set[Character]":
+        """This is the list of characters met along the way"""
         return super().roster - {self}
 
-    def add_event(self, e: "Event", d: bool = False):
-        assert e.can_attend, f"Cannot attend a synchronization marker"
-        super().add_event(e, d)
+    def add_event(self, e: "Event", dash_b4: bool = False, dash_next: bool = False):
+        assert e.can_attend, f"{self} cannot attend a synchronization marker, {e}"
+        super().add_event(e, dash_b4, dash_next)
         # add yourself to the roster of the events you attend
-        e.attendees.add(self)
+        e.add_character(self)
 
 
 class Storyboard(StoryElement):
@@ -469,6 +528,7 @@ class Storyboard(StoryElement):
         name: Optional[str] = None,
         file=None,
         load_final: bool = True,
+        g_attr: Optional[Dict[str, str]] = None,
         **kwargs,
     ):
         assert name or file, f"Need a name or a file to load from"
@@ -489,7 +549,7 @@ class Storyboard(StoryElement):
         }
         self.edge_iterator: int = 0
         self.graph = gv.Digraph(name=self.name)
-        self.graph.attr(compound="True")
+        self.graph.attr(compound="True", **g_attr)
         self.timelines: Set[Timeline] = set()
         self.places: Set[Place] = set()
 
@@ -593,7 +653,7 @@ class Storyboard(StoryElement):
     type=click.Path(exists=True, dir_okay=False, readable=True, allow_dash=True),
 )
 def main(loadfile):
-    s = Storyboard(file=loadfile)
+    s = Storyboard(file=loadfile, g_attr={"rankdir": "LR"})
     s.output()
 
 

@@ -1,4 +1,5 @@
 TYPE	NAME	COLOR	SHORTNAME
+comment	The above header colums must be in ALLCAPS
 Comment	Begin lines with 'comment\t' for a safe comment experience
 COMMENT	Lines that aren't formed to expectation will not halt the program but will throw errors to stderr
 comment	The accepted values for TYPE are "Comment", "Event", "Timeline", and "Character"
