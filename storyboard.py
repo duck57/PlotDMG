@@ -276,7 +276,7 @@ class Timeline(TimedEventSequence):
         self,
         *,
         universal_clock: bool = True,
-        start_stop: bool = True,
+        start_stop: bool = False,
         only_one: bool = False,
     ) -> gv.Digraph:
         g = gv.Digraph(("" if only_one else "cluster-") + self.name)
@@ -351,9 +351,9 @@ class Place(TimedEventSequence):
         *,
         show_name: bool = False,
         iterate_prefix: bool = False,
-        start_node: Optional[str] = True,
-        end_node: Optional[str] = True,
-        use_color: bool = False,
+        start_node: Optional[str] = False,
+        end_node: Optional[str] = False,
+        use_color: bool = True,
         **forced_attrs,
     ) -> None:
         if start_node == True:  # noqa
@@ -438,7 +438,7 @@ class EventAnchor(EventBase):
     ):
         super().__init__(name, tl, counter, **kwargs)
         if make_related:
-            {Event(f"{name}-{p.name}", p, counter) for p in tl.places}  # noqa  # noqa
+            {Event(f"{name}-{p.name}", p, counter) for p in tl.places}  # noqa
 
     @property
     def child_events(self) -> "Set[Event]":
@@ -581,6 +581,13 @@ class Storyboard(StoryElement):
         """Adds start/end events for better graph output"""
         if self.is_final:
             return
+        for t in self.timelines:
+            if not t.timestamps:
+                EventAnchor(f"empty-{t.name}-start", t, -1)
+                EventAnchor(f"empty-{t.name}-finish", t, 1)
+            else:
+                EventAnchor(f"{t.name} start", t, t.timestamps[0] - 1)
+                EventAnchor(f"{t.name} finish", t, t.timestamps[-1] + 1)
         for t in self.line_list.values():
             t.sort_events()
         self.is_final = True
