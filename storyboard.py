@@ -60,7 +60,7 @@ import csv
 from typing import *
 import abc
 import graphviz as gv
-from collections import Counter, namedtuple
+from collections import Counter
 from defaultlist import defaultlist
 
 
@@ -585,14 +585,22 @@ class Storyboard(StoryElement):
             t.sort_events()
         self.is_final = True
 
-    def output(self):
+    def output(self, quiet: bool = False, formats: List[str] = None):
+        if formats is None:
+            formats = ["pdf"]
+        else:
+            formats = [f.strip().lower() for f in formats]
         if not self.is_final:
             self.finalize()
             self.make_graph()
         click.echo(f"{len(self.event_list)} events")
         click.echo(f"{len(self.dramatis_personae)} characters")
         click.echo(f"{len(self.line_list)} timelines and places")
-        self.graph.view(quiet_view=True)
+        for f in formats:
+            try:
+                self.graph.render(view=not quiet, format=f, quiet_view=True)
+            except ValueError:
+                click.echo(f"Skipping invalid format {f}", err=True)
 
     def make_graph(self) -> gv.Digraph:
         """Converts the loaded data into a graph"""
@@ -651,10 +659,38 @@ class Storyboard(StoryElement):
 @click.argument(
     "loadfile",
     type=click.Path(exists=True, dir_okay=False, readable=True, allow_dash=True),
+    # help="path to the .tsv to render",
 )
-def main(loadfile):
-    s = Storyboard(file=loadfile, g_attr={"rankdir": "LR"})
-    s.output()
+@click.option(
+    "-d",
+    "--dir",
+    "rankdir",
+    type=click.Choice(["TB", "LR", "BT", "RL"], case_sensitive=False),
+    default="LR",
+    help="Rendering direction of the output",
+)
+@click.option(
+    "-o",
+    "--format",
+    "output_list",
+    type=click.STRING,
+    multiple=True,
+    default=["pdf"],
+    help="""Output format as specified by http://www.graphviz.org/doc/info/output.html
+    
+    Repeat to render to multiple formats at once.
+    A .gv file is always produced.""",
+)
+@click.option(
+    "-q",
+    "--quiet",
+    type=click.BOOL,
+    is_flag=True,
+    help="Do not open the output file(s) immediately after render.",
+)
+def main(loadfile, rankdir: str, output_list: List[str], quiet: bool):
+    s = Storyboard(file=loadfile, g_attr={"rankdir": rankdir.upper().strip()})
+    s.output(quiet, output_list)
 
 
 if __name__ == "__main__":
