@@ -274,6 +274,7 @@ class Timeline(TimedEventSequence):
 
     def make_graph(
         self,
+        direction: str = "LR",
         *,
         universal_clock: bool = True,
         start_stop: bool = False,
@@ -284,7 +285,7 @@ class Timeline(TimedEventSequence):
         if not only_one:
             g.attr(label=self.name)
         g.attr(color=self.color)
-        time_slices: List[gv.Digraph] = [e.make_cluster() for e in self.events]
+        time_slices: List[gv.Digraph] = [e.make_cluster(direction) for e in self.events]
         for i in range(len(time_slices)):
             g.subgraph(time_slices[i])
             if not i or not universal_clock:
@@ -380,6 +381,12 @@ class Place(TimedEventSequence):
 
 class EventBase(StoryElement):
     can_attend: bool
+    grad_dir: Dict[str, str] = {
+        "LR": "0",
+        "TB": "270",
+        "BT": "90",
+        "RL": "180",
+    }
 
     def __init__(
         self, name: str, tl: "LineType", counter: int, **kwargs,
@@ -398,6 +405,8 @@ class EventBase(StoryElement):
         self.attendees: "Counter[Character, int]" = Counter()
         self.entrances: "Set[Character]" = set()
         self.exits: "Set[Character]" = set()
+        self.opener: bool = True if kwargs.get("opener") else False
+        self.closer: bool = True if kwargs.get("closer") else False
 
     @property
     def pos(self) -> Tuple[int, int]:
@@ -446,12 +455,24 @@ class EventAnchor(EventBase):
             p.ts[self.counter] for p in self.line.places if self.counter in p.ts.keys()
         }
 
-    def make_cluster(self) -> gv.Digraph:
-        c = gv.Digraph(
-            name=f"cluster-{self.counter}", graph_attr={"label": f"{self.counter}"}
-        )
+    def make_cluster(self, g_dir: str = "LR") -> gv.Digraph:
+        ga: Dict[str, str] = {
+            "label": f"{self.counter}",
+            "gradientangle": self.grad_dir[g_dir],
+        }
+        color: str = self.color if self.color else "#00000088"
+        na: Dict[str, str] = {}
+        if self.opener:
+            ga["style"] = "filled,rounded"
+            ga["color"] = f"{color}:#FFFFFF00"
+            na["shape"] = "egg"
+        if self.closer:
+            ga["style"] = "filled,rounded"
+            ga["color"] = f"#FFFFFF00:{color}"
+            na["shape"] = "octagon"
+        c = gv.Digraph(name=f"cluster-{self.counter}", graph_attr=ga)
         for v in self.child_events:
-            c.node(v.node_name)
+            c.node(v.node_name, **na)
         c.node(self.node_name, shape="point", style="invis")
         return c
 
@@ -478,6 +499,8 @@ class Event(EventBase):
                 **kwargs,
             )
         )
+        self.opener = self.anchor.opener
+        self.closer = self.anchor.closer
 
     def add_character(self, c: "Character", /):
         super().add_character(c)
@@ -552,6 +575,7 @@ class Storyboard(StoryElement):
         self.graph.attr(compound="True", **g_attr)
         self.timelines: Set[Timeline] = set()
         self.places: Set[Place] = set()
+        self.direction: str = g_attr.get("rankdir", "LR")
 
         if not file:
             return
@@ -583,11 +607,11 @@ class Storyboard(StoryElement):
             return
         for t in self.timelines:
             if not t.timestamps:
-                EventAnchor(f"empty-{t.name}-start", t, -1)
-                EventAnchor(f"empty-{t.name}-finish", t, 1)
+                EventAnchor(f"empty-{t.name}-start", t, -1, opener=True)
+                EventAnchor(f"empty-{t.name}-finish", t, 1, closer=True)
             else:
-                EventAnchor(f"{t.name} start", t, t.timestamps[0] - 1)
-                EventAnchor(f"{t.name} finish", t, t.timestamps[-1] + 1)
+                EventAnchor(f"{t.name} start", t, t.timestamps[0] - 1, opener=True)
+                EventAnchor(f"{t.name} finish", t, t.timestamps[-1] + 1, closer=True)
         for t in self.line_list.values():
             t.sort_events()
         self.is_final = True
@@ -614,7 +638,10 @@ class Storyboard(StoryElement):
         # 1. create timelines
         for t in self.timelines:
             self.graph.subgraph(
-                t.make_graph(only_one=True if len(self.timelines) < 2 else False)
+                t.make_graph(
+                    only_one=True if len(self.timelines) < 2 else False,
+                    direction=self.direction,
+                )
             )
         # 2. add characters
         for c in self.dramatis_personae:
