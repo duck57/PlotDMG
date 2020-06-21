@@ -29,14 +29,12 @@ A universe timeline.
 For extensive time-skips in the same universe (think of time travelers from
 the Clinton years visiting the mid-Triassic), it may be appropriate to consider
 distant past and far future to be different timelines, even if they are connected
-:args (at least 3 required)
-1. horizontal offset (integer), defaults to 0
-2. spacing (integer), defaults to 1
-3. list of place names
-must be globally unique among both Timeline and Place names:
+:args (at least 1 required) list of place names:
+Timeline and Place names must be globally-unique in a shared pool
 
 TYPE: Event
 Something that happened.
+Event names must be globally-unique
 :SHORTNAME Integer timestamp for ordering relative to the rest of the Timeline or Place
     Timestamps should be unique for each Place
 :args (1 required)
@@ -656,15 +654,13 @@ class Storyboard(StoryElement):
         assert len(places) > 1, f"A timeline without places makes no sense"
         t = Timeline(
             self,
-            name if places[2:] else f"{name}-tl",
+            name if places else f"{name}-tl",
             short_name=short_name,
-            scaling=places[0],
-            offset=places[1],
             **kwargs,
         )
-        if not places[2:]:  # single-place timelines
+        if not places:  # single-place timelines
             Place(self, t, name, **kwargs)
-        for p in places[2:]:
+        for p in places:
             Place(self, t, p, **kwargs)
         return t
 
