@@ -282,6 +282,7 @@ class Timeline(TimedEventSequence):
         g.attr(compound="True")
         if not only_one:
             g.attr(label=self.name)
+            g.attr(penwidth="2")
         g.attr(color=self.color)
         time_slices: List[gv.Digraph] = [e.make_cluster(direction) for e in self.events]
         for i in range(len(time_slices)):
@@ -297,7 +298,7 @@ class Timeline(TimedEventSequence):
                 color=self.color,
                 label=f"{self.short_name}-{i}",
                 style="bold",
-                arrowhead="vee",
+                arrowhead="lvee" if i % 2 else "rvee",
             )
         if start_stop:
             start: str = "Start" if only_one else f"{self.short_name}\nstart"
@@ -444,33 +445,44 @@ class EventAnchor(EventBase):
         self, name: str, tl: Timeline, counter: int, make_related: bool = True, **kwargs
     ):
         super().__init__(name, tl, counter, **kwargs)
+        if self.opener or self.closer:
+            self.color = self.line.color
+        self.child_events: "Set[Event]" = set()
         if make_related:
-            {Event(f"{name}-{p.name}", p, counter) for p in tl.places}  # noqa
-
-    @property
-    def child_events(self) -> "Set[Event]":
-        return {
-            p.ts[self.counter] for p in self.line.places if self.counter in p.ts.keys()
-        }
+            self.child_events |= {
+                Event(f"{name}-{p.name}", p, counter, color=kwargs.get("color"))
+                for p in tl.places
+            }
 
     def make_cluster(self, g_dir: str = "LR") -> gv.Digraph:
         ga: Dict[str, str] = {
             "label": f"{self.counter}",
             "gradientangle": self.grad_dir[g_dir],
+            "color": self.color if self.color else "",
         }
-        color: str = self.color if self.color else "#00000088"
+        color: str = self.line.color if self.line.color else "#00000088"
         na: Dict[str, str] = {}
+        if self.opener or self.closer:
+            ga["style"] = "filled,rounded"
+            na["gradientangle"] = self.grad_dir[g_dir]
+            na["style"] = "filled"
+            ga["penwidth"] = "0"
+            na["penwidth"] = "0"
         if self.opener:
-            ga["style"] = "filled,rounded"
-            ga["color"] = f"{color}:#FFFFFF00"
+            ga["color"] = f"{color}:#FFFFFF33"
             na["shape"] = "egg"
+            na["color"] = f"#EDEDED99:{color}"
         if self.closer:
-            ga["style"] = "filled,rounded"
-            ga["color"] = f"#FFFFFF00:{color}"
+            ga["color"] = f"#FFFFFF33:{color}"
             na["shape"] = "octagon"
+            na["color"] = f"{color}:#EDEDED99"
         c = gv.Digraph(name=f"cluster-{self.counter}", graph_attr=ga)
         for v in self.child_events:
+            if v.color:  # for events with a custom color
+                na["color"] = v.color
             c.node(v.node_name, **na)
+            if v.color:  # clear color so it doesn't bleed over into other events
+                na.pop("color", "Blue")
         c.node(self.node_name, shape="point", style="invis")
         return c
 
@@ -486,6 +498,7 @@ class Event(EventBase):
         self, name: str, tl: Place, counter: int, **kwargs,
     ):
         super().__init__(name, tl, counter, **kwargs)
+        kwargs.pop("color", None)  # don't infect other nodes with your color
         self.anchor = (
             tl.timeline.ts[counter]
             if counter in tl.timeline.ts.keys()
@@ -497,6 +510,7 @@ class Event(EventBase):
                 **kwargs,
             )
         )
+        self.anchor.child_events.add(self)
         self.opener = self.anchor.opener
         self.closer = self.anchor.closer
 
@@ -651,12 +665,8 @@ class Storyboard(StoryElement):
         return self.dramatis_personae
 
     def create_timeline(self, name: str, short_name: str, *places: str, **kwargs):
-        assert len(places) > 1, f"A timeline without places makes no sense"
         t = Timeline(
-            self,
-            name if places else f"{name}-tl",
-            short_name=short_name,
-            **kwargs,
+            self, name if places else f"{name}-tl", short_name=short_name, **kwargs,
         )
         if not places:  # single-place timelines
             Place(self, t, name, **kwargs)
