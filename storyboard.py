@@ -598,7 +598,7 @@ class Character(EventSequence):
             self.latest_event.exits.add(self)
             self.latest_event.anchor.exits.add(self)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Character {self.name}"
 
     @property
@@ -615,6 +615,22 @@ class Character(EventSequence):
     @staticmethod
     def lst2str(a: "Iterable[Character]") -> str:
         return ", ".join(c.name for c in a)
+
+    def draw_friendships(self, g: gv.Graph) -> None:
+        n = self.name
+        dc = "#111111"
+        c = self.color if self.color else dc
+        t = f"Meets {len(self.roster)} others"
+        t += " (looper)" if self.has_loop else ""
+        g.node(n, color=c, tooltip=t, shape="signature")
+        general_args: Dict[str, str] = {
+            "penwidth": "2",
+        }
+        if self.has_loop:
+            g.edge(n, n, **general_args, color=c, dir="forward")
+        for r in self.roster:
+            x = r.color if r.color else dc
+            g.edge(n, r.name, **general_args, color=f"{c}:{x}")
 
 
 class Storyboard(StoryElement):
@@ -650,6 +666,11 @@ class Storyboard(StoryElement):
         self.places: Set[Place] = set()
         self.direction: str = g_attr.get("rankdir", "LR")
         self.color_names: bool = kwargs.get("color_names")
+        self.friendships = gv.Graph(
+            name=f"{self.name}~friendships",
+            strict=True,
+            graph_attr={"fontname": "signature"},
+        )
 
         if not file:
             return
@@ -717,7 +738,6 @@ class Storyboard(StoryElement):
         else:
             formats = [f.strip().lower() for f in formats]
         if not self.is_final:
-            self.finalize()
             self.make_graph()
         stats = "\n".join(
             [
@@ -732,6 +752,7 @@ class Storyboard(StoryElement):
         for f in formats:
             try:
                 self.graph.render(format=f, quiet_view=False if quiet else True)
+                self.friendships.render(format=f, quiet_view=False if quiet else True)
             except ValueError:
                 click.echo(f"Skipping invalid format {f}", err=True)
         f = open(f"{self.name}.gvroster.txt", "w")
@@ -745,8 +766,10 @@ class Storyboard(StoryElement):
         )
         f.close()
 
-    def make_graph(self) -> gv.Digraph:
+    def make_graph(self) -> None:
         """Converts the loaded data into a graph"""
+        if not self.is_final:
+            self.finalize()
         # 1. create timelines
         for t in self.timelines:
             self.graph.subgraph(
@@ -756,10 +779,10 @@ class Storyboard(StoryElement):
                     color_names=self.color_names,
                 )
             )
-        # 2. add characters
+        # 2. add characters and make the friendship graph
         for c in self.dramatis_personae:
             c.make_edges(self.graph, color_names=self.color_names)
-        return self.graph
+            c.draw_friendships(self.friendships)
 
     @property
     def roster(self) -> "Set[Character]":
