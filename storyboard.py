@@ -158,6 +158,9 @@ class EventSequence(StoryElement):
             r: Dict[str, str] = attrs
             if use_color:
                 r["color"] = self.color
+            if attrs.get("color_names"):
+                r["fontcolor"] = self.color
+                r.pop("color_names")
             return r
 
         if start_node:
@@ -277,12 +280,17 @@ class Timeline(TimedEventSequence):
         universal_clock: bool = True,
         start_stop: bool = False,
         only_one: bool = False,
+        color_names: bool = False,
     ) -> gv.Digraph:
         g = gv.Digraph(("" if only_one else "cluster-") + self.name)
         g.attr(compound="True")
         if not only_one:
             g.attr(label=self.name)
             g.attr(penwidth="2")
+            if color_names:
+                g.attr(fontcolor=self.color)
+            g.attr(fontname="sans bold")
+            g.attr(fontsize="28")
         g.attr(color=self.color)
         time_slices: List[gv.Digraph] = [e.make_cluster(direction) for e in self.events]
         for i in range(len(time_slices)):
@@ -299,8 +307,14 @@ class Timeline(TimedEventSequence):
                 label=f"{self.short_name}-{i}",
                 style="bold",
                 arrowhead="lvee" if i % 2 else "rvee",
+                fontcolor=self.color if color_names else "",
+                fontname="sans italic",
             )
         if start_stop:
+            """
+            This section may be useful in the future.
+            However, it is currently skipped because it tends to produce cluttered output.
+            """
             start: str = "Start" if only_one else f"{self.short_name}\nstart"
             stop: str = "End" if only_one else f"{self.short_name}\nfinish"
             g.node(start, shape="star", color=self.color)
@@ -459,6 +473,8 @@ class EventAnchor(EventBase):
             "label": f"{self.counter}",
             "gradientangle": self.grad_dir[g_dir],
             "color": self.color if self.color else "",
+            "fontsize": "",
+            "fontname": "",
         }
         color: str = self.line.color if self.line.color else "#00000088"
         na: Dict[str, str] = {}
@@ -588,6 +604,7 @@ class Storyboard(StoryElement):
         self.timelines: Set[Timeline] = set()
         self.places: Set[Place] = set()
         self.direction: str = g_attr.get("rankdir", "LR")
+        self.color_names: bool = kwargs.get("color_names")
 
         if not file:
             return
@@ -641,7 +658,7 @@ class Storyboard(StoryElement):
         click.echo(f"{len(self.line_list)} timelines and places")
         for f in formats:
             try:
-                self.graph.render(view=not quiet, format=f, quiet_view=True)
+                self.graph.render(format=f, quiet_view=False if quiet else True)
             except ValueError:
                 click.echo(f"Skipping invalid format {f}", err=True)
 
@@ -653,11 +670,12 @@ class Storyboard(StoryElement):
                 t.make_graph(
                     only_one=True if len(self.timelines) < 2 else False,
                     direction=self.direction,
+                    color_names=self.color_names,
                 )
             )
         # 2. add characters
         for c in self.dramatis_personae:
-            c.make_edges(self.graph)
+            c.make_edges(self.graph, color_names=self.color_names)
         return self.graph
 
     @property
@@ -728,8 +746,21 @@ class Storyboard(StoryElement):
     is_flag=True,
     help="Do not open the output file(s) immediately after render.",
 )
-def main(loadfile, rankdir: str, output_list: List[str], quiet: bool):
-    s = Storyboard(file=loadfile, g_attr={"rankdir": rankdir.upper().strip()})
+@click.option(
+    "-c",
+    "--color-names",
+    type=click.BOOL,
+    is_flag=True,
+    help="Names follow their associated line color",
+)
+def main(
+    loadfile, rankdir: str, output_list: List[str], quiet: bool, color_names: bool
+):
+    s = Storyboard(
+        file=loadfile,
+        g_attr={"rankdir": rankdir.upper().strip()},
+        color_names=color_names,
+    )
     s.output(quiet, output_list)
 
 
