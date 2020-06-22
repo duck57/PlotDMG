@@ -79,6 +79,20 @@ class StoryElement(abc.ABC):
     def roster(self) -> "Set[Character]":
         pass
 
+    @property
+    def tooltip_txt(self) -> str:
+        if not self.roster:
+            return ""
+        return f"{self.name}" + ("\n📒Roster: " + Character.lst2str(self.roster))
+
+    @property
+    def tooltip_js(self) -> str:
+        t: str = self.tooltip_txt
+        if not t:
+            return t
+        t = t.replace("\n", "\\n")
+        return f"javascript:alert('{t}');"
+
     def __str__(self):
         return self.name
 
@@ -103,6 +117,11 @@ class EventSequence(StoryElement):
     @property
     def events(self) -> "List[EventType]":
         return [e[0] for e in self.e_lst]
+
+    @property
+    def has_loop(self) -> bool:
+        """Does this sequence contain the same event twice?"""
+        return False if len(self.events) == len(set(self.events)) else True
 
     @property
     def latest_event(self) -> "EventType":
@@ -226,7 +245,6 @@ class TimedEventSequence(EventSequence):
         if self.short_name.lower().strip() != self.key:
             story.line_list[self.short_name.lower()] = self
         self.ts: "Dict[int, EventType]" = {}
-        self.v_pos: int = kwargs.get("v_pos", 0)
 
     @property
     def timestamps(self) -> "List[int]":
@@ -239,8 +257,8 @@ class TimedEventSequence(EventSequence):
         """Sorts the event sequence into chronological order"""
         self.e_lst.sort(key=TimedEventSequence.time_key)
 
-    @classmethod
-    def time_key(cls, x: "Tuple[EventType, bool, bool]") -> int:
+    @staticmethod
+    def time_key(x: "Tuple[EventType, bool, bool]") -> int:
         return x[0].counter
 
     def add_event(self, e: "EventType", dash_b4: bool = True, dash_next: bool = True):
@@ -283,15 +301,18 @@ class Timeline(TimedEventSequence):
         color_names: bool = False,
     ) -> gv.Digraph:
         g = gv.Digraph(("" if only_one else "cluster-") + self.name)
-        g.attr(compound="True")
+        g.attr(compound="True", color=self.color)
         if not only_one:
-            g.attr(label=self.name)
-            g.attr(penwidth="2")
             if color_names:
                 g.attr(fontcolor=self.color)
-            g.attr(fontname="sans bold")
-            g.attr(fontsize="28")
-        g.attr(color=self.color)
+            g.attr(
+                label=self.name,
+                penwidth="2",
+                fontname="sans bold",
+                fontsize="28",
+                tooltip=self.tooltip_txt,
+                URL=self.tooltip_js,
+            )
         time_slices: List[gv.Digraph] = [e.make_cluster(direction) for e in self.events]
         for i in range(len(time_slices)):
             g.subgraph(time_slices[i])
@@ -392,7 +413,7 @@ class Place(TimedEventSequence):
         )  # is there a better way to do this?
 
 
-class EventBase(StoryElement):
+class EventBase(StoryElement, abc.ABC):
     can_attend: bool
     grad_dir: Dict[str, str] = {
         "LR": "0",
@@ -420,10 +441,7 @@ class EventBase(StoryElement):
         self.exits: "Set[Character]" = set()
         self.opener: bool = True if kwargs.get("opener") else False
         self.closer: bool = True if kwargs.get("closer") else False
-
-    @property
-    def pos(self) -> Tuple[int, int]:
-        return self.counter, self.line.v_pos
+        self.ue: bool = True if kwargs.get("UE") else False
 
     @property
     def loopers(self) -> "Set[Character]":
@@ -433,6 +451,19 @@ class EventBase(StoryElement):
         return f"Event {self.name} at {self.counter} in {self.line}"
 
     @property
+    def tooltip_txt(self) -> str:
+        o: str = super().tooltip_txt
+        if not self.ue:
+            o = o.replace(self.name, f"{self.name} [{self.line.name}]")
+        if self.entrances:
+            o += "\n🛬Entrances: " + Character.lst2str(self.entrances)
+        if self.exits:
+            o += "\n🛫Departures: " + Character.lst2str(self.exits)
+        if self.loopers:
+            o += "\n➰Loopers: " + Character.lst2str(self.loopers)
+        return o
+
+    @property
     def roster(self) -> "Set[Character]":
         return set(self.attendees)
 
@@ -440,8 +471,8 @@ class EventBase(StoryElement):
     def node_name(self) -> str:
         return self.name.replace("-", "\n")
 
-    @classmethod
-    def event_key(cls, e: "EventType") -> int:
+    @staticmethod
+    def event_key(e: "EventType") -> int:
         return e.counter
 
     def add_character(self, c: "Character", /):
@@ -463,8 +494,10 @@ class EventAnchor(EventBase):
             self.color = self.line.color
         self.child_events: "Set[Event]" = set()
         if make_related:
-            self.child_events |= {
-                Event(f"{name}-{p.name}", p, counter, color=kwargs.get("color"))
+            self.child_events |= {  # this unnecessary set union is to make the linter shut up
+                Event(
+                    f"{name}-{p.name}", p, counter, color=kwargs.get("color"), UE=True
+                )
                 for p in tl.places
             }
 
@@ -475,6 +508,8 @@ class EventAnchor(EventBase):
             "color": self.color if self.color else "",
             "fontsize": "",
             "fontname": "",
+            "tooltip": self.tooltip_txt,
+            "URL": self.tooltip_js,
         }
         color: str = self.line.color if self.line.color else "#00000088"
         na: Dict[str, str] = {}
@@ -494,6 +529,8 @@ class EventAnchor(EventBase):
             na["color"] = f"{color}:#EDEDED99"
         c = gv.Digraph(name=f"cluster-{self.counter}", graph_attr=ga)
         for v in self.child_events:
+            na["tooltip"] = v.tooltip_txt
+            na["URL"] = v.tooltip_js
             if v.color:  # for events with a custom color
                 na["color"] = v.color
             c.node(v.node_name, **na)
@@ -507,8 +544,6 @@ class Event(EventBase):
     """
     Events in a Place that characters can attend
     """
-
-    can_attend = True
 
     def __init__(
         self, name: str, tl: Place, counter: int, **kwargs,
@@ -534,6 +569,10 @@ class Event(EventBase):
         super().add_character(c)
         self.anchor.add_character(c)
 
+    @property
+    def can_attend(self) -> bool:
+        return False if self.opener or self.closer else True
+
 
 EventType = TypeVar("EventType", bound=EventBase)
 LineType = TypeVar("LineType", bound=TimedEventSequence)
@@ -555,7 +594,9 @@ class Character(EventSequence):
             self.add_event(s.event_list[e], dash_previous, dash_next)
         if self.events:
             self.events[0].entrances.add(self)
+            self.events[0].anchor.entrances.add(self)
             self.latest_event.exits.add(self)
+            self.latest_event.anchor.exits.add(self)
 
     def __repr__(self):
         return f"Character {self.name}"
@@ -570,6 +611,10 @@ class Character(EventSequence):
         super().add_event(e, dash_b4, dash_next)
         # add yourself to the roster of the events you attend
         e.add_character(self)
+
+    @staticmethod
+    def lst2str(a: "Iterable[Character]") -> str:
+        return ", ".join(c.name for c in a)
 
 
 class Storyboard(StoryElement):
@@ -630,6 +675,10 @@ class Storyboard(StoryElement):
     def nested_lines(self) -> "Dict[Timeline, Set[Place]]":
         return {t: t.places for t in self.timelines}
 
+    @property
+    def location_count(self) -> int:
+        return sum(len(v) for v in self.nested_lines.values())
+
     def finalize(self):
         """Adds start/end events for better graph output"""
         if self.is_final:
@@ -645,6 +694,23 @@ class Storyboard(StoryElement):
             t.sort_events()
         self.is_final = True
 
+    @property
+    def events(self) -> "List[EventType]":
+        """Returns a list of events that characters may attend"""
+        return [e for e in self.event_list.values() if e.can_attend]
+
+    @property
+    def timeboxen(self) -> "List[EventType]":
+        """
+        Returns the list of event anchors created by the story
+        (ignores the start/stop boxen)
+        """
+        return [
+            e
+            for e in self.event_list.values()
+            if not e.can_attend and not (e.opener or e.closer)
+        ]
+
     def output(self, quiet: bool = False, formats: List[str] = None):
         if formats is None:
             formats = ["pdf"]
@@ -653,14 +719,31 @@ class Storyboard(StoryElement):
         if not self.is_final:
             self.finalize()
             self.make_graph()
-        click.echo(f"{len(self.event_list)} events")
-        click.echo(f"{len(self.dramatis_personae)} characters")
-        click.echo(f"{len(self.line_list)} timelines and places")
+        stats = "\n".join(
+            [
+                f"{len(self.events)} events",
+                f"\t(sorted into {len(self.timeboxen)} timeboxen)",
+                f"{len(self.dramatis_personae)} characters",
+                f"{len(set(self.line_list.values()))} timelines and places",  # always plural
+            ]
+        )
+        click.echo(stats)
+        self.graph.attr(tooltip=f"{self.name}\n{stats}")
         for f in formats:
             try:
                 self.graph.render(format=f, quiet_view=False if quiet else True)
             except ValueError:
                 click.echo(f"Skipping invalid format {f}", err=True)
+        f = open(f"{self.name}.gvroster.txt", "w")
+        f.write(
+            "\n".join(
+                [
+                    f"{c.name} {'(looper) ' if c.has_loop else ''}meets {Character.lst2str(c.roster)}"
+                    for c in self.dramatis_personae
+                ]
+            )
+        )
+        f.close()
 
     def make_graph(self) -> gv.Digraph:
         """Converts the loaded data into a graph"""
