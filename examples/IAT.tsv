@@ -1,0 +1,15 @@
+TYPE	NAME	COLOR	SHORTNAME
+COMMENT	An example file based on the plot of MLP:FiM S02E20 'It's about Time'
+comment	Other MLP stuff is included to demonstrate coloration of events as well as universal nodes
+Timeline	Equestria		Eq	Canterlot	Ponyville	Crystal Empire
+Event	Twilight meets herself		10022002	Ponyville
+Event	NMM-return		10010100	Equestria
+Event	Discord	brown	10020100	Equestria
+Event	Crystal Empire Liberated	pink	10030269	Crystal Empire
+Event	Browsing the archives		10022020	Canterlot
+Event	Teleport to past		10022021	Canterlot
+Event	Back in Canterlot		10022022	Canterlot
+Character	Twilight Sparkle	Purple	TS	NMM-return-Ponyville	Discord-Canterlot	Discord-Ponyville	Twilight meets herself	Browsing the archives
+Character	Future Twilight	#441155	FT	browsing the archives	teleport to past-(	twilight meets herself	)-back in Canterlot	crystal empire liberated
+Character	Test NMM	BLACK	NMM	NMM-return-Ponyville	NMM-return-Ponyville
+Comment	Nightmare Moon's self-loop is here to demonstrate a self-loop in the output layer
