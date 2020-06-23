@@ -16,7 +16,7 @@ TYPE    NAME    COLOR   SHORTNAME   *args
 
 TYPE of entry: either Timeline, Event, or Character
 NAME of entry, globally unique within its TYPE
-COLOR to graph (optional)
+COLOR to graph (optional), list of valid colors http://www.graphviz.org/doc/info/colors.html
 SHORTNAME for graph display (or timestamp for an Event)
 *args depend on the TYPE
 
@@ -416,6 +416,10 @@ class Place(TimedEventSequence):
             **forced_attrs,
         )  # is there a better way to do this?
 
+    @property
+    def tooltip_txt(self) -> str:
+        return super().tooltip_txt.replace("\n📒Roster: ", "\nVisitors: ")
+
 
 class EventBase(StoryElement, abc.ABC):
     can_attend: bool
@@ -566,16 +570,36 @@ class Event(EventBase):
             )
         )
         self.anchor.child_events.add(self)
-        self.opener = self.anchor.opener
-        self.closer = self.anchor.closer
 
     def add_character(self, c: "Character", /):
         super().add_character(c)
         self.anchor.add_character(c)
 
     @property
+    def opener(self) -> bool:
+        return self.anchor.opener
+
+    @opener.setter
+    def opener(self, x: bool) -> None:
+        pass  # this is set by the anchor event
+
+    @property
+    def closer(self) -> bool:
+        return self.anchor.closer
+
+    @closer.setter
+    def closer(self, x: bool) -> None:
+        pass  # this is set by the anchor event
+
+    @property
     def can_attend(self) -> bool:
         return False if self.opener or self.closer else True
+
+    @property
+    def tooltip_txt(self) -> str:
+        return (
+            self.line.tooltip_txt if self.opener or self.closer else super().tooltip_txt
+        )
 
 
 EventType = TypeVar("EventType", bound=EventBase)
@@ -797,11 +821,14 @@ class Storyboard(StoryElement):
         click.echo(stats)
         self.graph.attr(tooltip=f"{self.name}\n{stats}")
         for f in formats:
+            if not f:
+                continue
             try:
                 self.graph.render(format=f, quiet_view=False if quiet else True)
                 self.friendships.render(format=f, quiet_view=False if quiet else True)
             except ValueError:
                 click.echo(f"Skipping invalid format {f}", err=True)
+                continue
         f = open(f"{self.name}.gvroster.txt", "w")
         f.write(
             "\n".join(
@@ -870,7 +897,6 @@ class Storyboard(StoryElement):
 @click.argument(
     "loadfile",
     type=click.Path(exists=True, dir_okay=False, readable=True, allow_dash=True),
-    # help="path to the .tsv to render",
 )
 @click.option(
     "-d",
@@ -878,7 +904,14 @@ class Storyboard(StoryElement):
     "rankdir",
     type=click.Choice(["TB", "LR", "BT", "RL"], case_sensitive=False),
     default="LR",
-    help="Rendering direction of the output",
+    help="""
+    Rendering direction of the output
+    
+    The default left to right format works very nicely on simple storyboards.
+    Top to bottom rendering tends to produce better results on very complex
+    stories.  However, you will need to experiment both ways to discover which better
+    suits your plot.
+    """,
 )
 @click.option(
     "-o",
@@ -887,10 +920,16 @@ class Storyboard(StoryElement):
     type=click.STRING,
     multiple=True,
     default=["svg", "pdf"],
-    help="""Output format as specified by http://www.graphviz.org/doc/info/output.html
+    help="""
+    Output format as specified by http://www.graphviz.org/doc/info/output.html
     
     Repeat to render to multiple formats at once.
-    A .gv file is always produced.""",
+    Two .gv files are always produced.
+    Invalid formats are skipped.
+    
+    Output files all end with '.gv*': run 'rm *.gv*' to clean up.
+    Input tsv files are left untouched.
+    """,
 )
 @click.option(
     "-q",
