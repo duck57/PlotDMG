@@ -87,11 +87,15 @@ class StoryElement(abc.ABC):
 
     @property
     def tooltip_js(self) -> str:
-        t: str = self.tooltip_txt
-        if not t:
-            return t
-        t = t.replace("\n", "\\n")
-        return f"javascript:alert('{t}');"
+        return self.jsa(self.tooltip_txt)
+
+    @staticmethod
+    def jsa(m: str) -> str:
+        if not m:
+            return m
+        m = m.replace("\n", "\\n")
+        m = m.replace("'", "\\'")
+        return f"javascript:alert('{m}');"
 
     def __str__(self):
         return self.name
@@ -584,6 +588,8 @@ class Character(EventSequence):
         self.story.dramatis_personae.add(self)
         for e in event_list:
             e = e.strip().lower()
+            if not e:
+                continue  # prevent errors for rearranged&deleted events
             n = e.split("-")
             dash_previous: bool = True if n[0] == ")" else False
             dash_next: bool = True if n[-1] == "(" else False
@@ -604,7 +610,7 @@ class Character(EventSequence):
     @property
     def roster(self) -> "Set[Character]":
         """This is the list of characters met along the way"""
-        return super().roster - {self}
+        return super().roster - (set() if self.has_loop else {self})
 
     def add_event(self, e: "Event", dash_b4: bool = False, dash_next: bool = False):
         assert e.can_attend, f"{self} cannot attend a synchronization marker, {e}"
@@ -622,15 +628,56 @@ class Character(EventSequence):
         c = self.color if self.color else dc
         t = f"Meets {len(self.roster)} others"
         t += " (looper)" if self.has_loop else ""
-        g.node(n, color=c, tooltip=t, shape="signature")
+        u = self.jsa(
+            (
+                f"{n} meets {', '.join({x.name for x in self.roster})}"
+                if self.roster
+                else f"{n} is lonely"
+            )
+            + f" over {len(set(self.events))} events"
+        )
+        g.node(
+            n, color=c, tooltip=t, shape="signature", URL=u,
+        )
         general_args: Dict[str, str] = {
             "penwidth": "2",
         }
-        if self.has_loop:
-            g.edge(n, n, **general_args, color=c, dir="forward")
         for r in self.roster:
             x = r.color if r.color else dc
-            g.edge(n, r.name, **general_args, color=f"{c}:{x}")
+            rn = r.name
+            color = f"{c}:{x}"
+            d = ""
+            m, e = self.count_meetings(r)
+            w = str(m)
+            tt = f"{n}--{rn}\nMeet {m} times over {e} events"
+            if r == self:
+                if not m:
+                    continue
+                color, d = c, "forward"
+                tt = f"{n}\n{m} self-encounters"
+            g.edge(
+                n,
+                rn,
+                **general_args,
+                color=color,
+                dir=d,
+                tooltip=tt,
+                weight="0" if r == self else w,
+                # label=w,  # this makes things too cluttered
+                labelfontname="monospace",
+                labelfontsize="8",
+                URL=self.jsa(tt),
+            )
+
+    def count_meetings(self, c: "Character") -> Tuple[int, int]:
+        """
+        :param c: who did you meet?
+        :return: how many times did you meet over how many events?
+        """
+        meeting_list: List[int] = [
+            e.attendees[c] - (1 if c == self else 0) for e in set(self.events)
+        ]
+        return sum(meeting_list), len([i for i in meeting_list if i > 0])
 
 
 class Storyboard(StoryElement):
@@ -839,7 +886,7 @@ class Storyboard(StoryElement):
     "output_list",
     type=click.STRING,
     multiple=True,
-    default=["pdf"],
+    default=["svg", "pdf"],
     help="""Output format as specified by http://www.graphviz.org/doc/info/output.html
     
     Repeat to render to multiple formats at once.
