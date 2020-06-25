@@ -1,0 +1,8 @@
+TYPE	NAME	COLOR	SHORTNAME
+Timeline	Somewhere		STL		
+Event	1		1	Somewhere
+Event	2		2	Somewhere
+Event	3		3	Somewhere
+Character	The Lonliest Number	Green	One	1	1	)-1	2	3	2	1
+Character	Just as Bad as One	Pink	Two	2	2	1	1-(	3
+Combiner	Both	Orange		One	Two

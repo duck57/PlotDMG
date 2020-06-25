@@ -51,14 +51,25 @@ Dashed connections
     prefix )- to an event name to dash from previous event
 :
 
+TYPE: Combiner
+These characters will share a line when traveling between the same events
+:args (2 or more required)
+    list of character names to combine
+:
+
+TYPE: Comment
+A comment line that will be skipped without errors or warnings
+:args whatever you want:
+
 """
+from copy import deepcopy
 
 import click
 import csv
 from typing import *
 import abc
 import graphviz as gv
-from collections import Counter
+from collections import Counter, defaultdict
 from defaultlist import defaultlist
 
 
@@ -101,7 +112,21 @@ class StoryElement(abc.ABC):
         return self.name
 
 
-class EventSequence(StoryElement):
+class EventConnector(StoryElement, abc.ABC):
+    def __init__(self, name: str, s: "Storyboard", **kwargs):
+        super().__init__(name, s, **kwargs)
+        self.bridges: "List[EventBridge]" = []
+
+    @abc.abstractmethod
+    def build_bridges(self) -> None:
+        pass
+
+    def add_links_to_story(self) -> None:
+        for b in self.bridges:
+            b.add_to_story_queue()
+
+
+class EventSequence(EventConnector, abc.ABC):
     def __init__(
         self,
         name: str,
@@ -121,6 +146,23 @@ class EventSequence(StoryElement):
     @property
     def events(self) -> "List[EventType]":
         return [e[0] for e in self.e_lst]
+
+    def build_bridges(
+        self,
+        show_name: bool = True,
+        show_number: bool = True,
+        da: Dict[str, str] = None,
+        add_now: bool = True,
+    ) -> None:
+        if not da:
+            da = {}
+        for i in range(1, len(self.e_lst)):
+            past, future = self.e_lst[i - 1].event, self.e_lst[i].event
+            dash = self.e_lst[i - 1].dash_to_next or self.e_lst[i].dash_from_previous
+            x = EventBridge(self, i, past, future, dash, show_name, show_number, da)
+            self.bridges.append(x)
+        if add_now:  # you need to do this manually in the overriding method if False
+            self.add_links_to_story()
 
     @property
     def has_loop(self) -> bool:
@@ -162,65 +204,6 @@ class EventSequence(StoryElement):
             out |= event.roster
         return out
 
-    def make_edges(
-        self,
-        g: gv.Digraph,
-        /,
-        *,
-        show_name: bool = True,
-        iterate_prefix: bool = True,
-        start_node: Optional[str] = None,
-        end_node: Optional[str] = None,
-        use_color: bool = True,
-        **attrs,
-    ) -> None:
-        if (not self.e_lst) and (not start_node or not end_node):
-            return  # Nothing to display
-
-        def attrs_d() -> Dict[str, str]:
-            r: Dict[str, str] = attrs
-            if use_color:
-                r["color"] = self.color
-            if attrs.get("color_names"):
-                r["fontcolor"] = self.color
-                r.pop("color_names")
-            return r
-
-        if start_node:
-            g.edge(
-                start_node,
-                self.events[0].node_name if self.events else end_node,
-                self.name if show_name else None,
-                **attrs_d(),
-            )
-        att: Dict[str, str] = attrs_d()
-        att["show_name"] = str(show_name)
-        att["line_name"] = self.short_name
-        att["show_number"] = str(iterate_prefix)
-        for i in range(1, len(self.e_lst)):
-            att["sequence_suffix"] = f"-{i}"
-            self.link2events(g, self.e_lst[i - 1], self.e_lst[i], **att)
-        if end_node and self.events:
-            g.edge(
-                self.events[-1].node_name,
-                end_node,
-                self.name if show_name else None,
-                **attrs_d(),
-            )
-
-    @staticmethod
-    def link2events(
-        g: gv.Digraph, /, past: "EventInSequence", future: "EventInSequence", **attrs
-    ):
-        if not attrs.get("style"):
-            if past.dash_to_next or future.dash_from_previous:
-                attrs["style"] = "dashed"
-        if attrs["show_name"] == "True":
-            attrs["label"] = attrs["line_name"] + (
-                attrs["sequence_suffix"] if attrs["show_number"] == "True" else ""
-            )
-        g.edge(past.node_name, future.node_name, **attrs)
-
 
 class EventInSequence(NamedTuple):
     event: "EventType"
@@ -236,7 +219,7 @@ class EventInSequence(NamedTuple):
         return self.event.node_name
 
 
-class TimedEventSequence(EventSequence):
+class TimedEventSequence(EventSequence, abc.ABC):
     def __init__(self, name: str, story: "Storyboard", **kwargs):
         super().__init__(name, story, **kwargs)
         assert (
@@ -262,8 +245,8 @@ class TimedEventSequence(EventSequence):
         self.e_lst.sort(key=TimedEventSequence.time_key)
 
     @staticmethod
-    def time_key(x: "Tuple[EventType, bool, bool]") -> int:
-        return x[0].counter
+    def time_key(x: "EventInSequence") -> int:
+        return x.event.counter
 
     def add_event(self, e: "EventType", dash_b4: bool = True, dash_next: bool = True):
         assert (
@@ -300,7 +283,6 @@ class Timeline(TimedEventSequence):
         direction: str = "LR",
         *,
         universal_clock: bool = True,
-        start_stop: bool = False,
         only_one: bool = False,
         color_names: bool = False,
     ) -> gv.Digraph:
@@ -317,51 +299,23 @@ class Timeline(TimedEventSequence):
                 tooltip=self.tooltip_txt,
                 URL=self.tooltip_js,
             )
-        time_slices: List[gv.Digraph] = [e.make_cluster(direction) for e in self.events]
-        for i in range(len(time_slices)):
-            g.subgraph(time_slices[i])
-            if not i or not universal_clock:
-                continue  # there needs to be a previous time for the link to work
-            g.edge(
-                self.events[i - 1].node_name,
-                self.events[i].node_name,
-                minlen="1",
-                ltail=time_slices[i - 1].name,
-                lhead=time_slices[i].name,
-                color=self.color,
-                label=f"{self.short_name}-{i}",
-                style="bold",
-                arrowhead="lvee" if i % 2 else "rvee",
-                fontcolor=self.color if color_names else "",
-                fontname="sans italic",
-            )
-        if start_stop:
-            """
-            This section may be useful in the future.
-            However, it is currently skipped because it tends to produce cluttered output.
-            """
-            start: str = "Start" if only_one else f"{self.short_name}\nstart"
-            stop: str = "End" if only_one else f"{self.short_name}\nfinish"
-            g.node(start, shape="star", color=self.color)
-            g.node(stop, shape="tripleoctagon", color=self.color)
-            g.edge(
-                start,
-                self.events[0].node_name if self.events else stop,
-                lhead=time_slices[0].name if self.events else None,
-                color=self.color,
-                style="bold",
-            )
-            if self.events:
-                g.edge(
-                    self.events[-1].node_name,
-                    stop,
-                    ltail=time_slices[-1].name,
-                    color=self.color,
-                    style="bold",
-                )
-        for p in self.places:
-            p.make_edges(g)
+        for ts in [e.make_cluster(direction) for e in self.events]:
+            g.subgraph(ts)
         return g
+
+    def build_bridges(
+        self, show_name: bool = True, show_number: bool = True, **da
+    ) -> None:
+        if not da.get("style"):
+            da["style"] = "bold"
+        if not da.get("fontname"):
+            da["fontname"] = "sans italic"
+        if not da.get("minlen"):
+            da["minlen"] = "1"
+        super().build_bridges(show_name, show_number, da, add_now=False)
+        for b in self.bridges:
+            b.add_cluster_endings()
+        self.add_links_to_story()
 
 
 class Place(TimedEventSequence):
@@ -383,38 +337,14 @@ class Place(TimedEventSequence):
     def __repr__(self):
         return f"Place {self.name}"
 
-    def make_edges(
-        self,
-        g: gv.Digraph,
-        /,
-        *,
-        show_name: bool = False,
-        iterate_prefix: bool = False,
-        start_node: Optional[str] = False,
-        end_node: Optional[str] = False,
-        use_color: bool = True,
-        **forced_attrs,
+    def build_bridges(
+        self, show_name: bool = False, show_number: bool = False, **da
     ) -> None:
-        if start_node == True:  # noqa
-            start_node = f"{self.short_name}\nstart"
-        if end_node == True:  # noqa
-            end_node = f"{self.short_name}\nfinish"
-        if start_node:
-            g.node(start_node, shape="invtrapezium")
-        if end_node:
-            g.node(end_node, shape="octagon")
-            g.node(end_node, shape="octagon")
-        return super().make_edges(
-            g,
-            show_name=show_name,
-            iterate_prefix=iterate_prefix,
-            start_node=start_node,
-            end_node=end_node,
-            use_color=use_color,
-            style="dotted",
-            arrowhead="onormal",
-            **forced_attrs,
-        )  # is there a better way to do this?
+        if not da.get("style"):
+            da["style"] = "dotted"
+        if not da.get("arrowhead"):
+            da["arrowhead"] = "onormal"
+        super().build_bridges(show_name, show_number, da)
 
     @property
     def tooltip_txt(self) -> str:
@@ -444,12 +374,13 @@ class EventBase(StoryElement, abc.ABC):
         self.line = tl
         self.counter = counter
         self.line.add_event(self)
-        self.attendees: "Counter[Character, int]" = Counter()
+        self.attendees: "Counter[Character]" = Counter()
         self.entrances: "Set[Character]" = set()
         self.exits: "Set[Character]" = set()
         self.opener: bool = True if kwargs.get("opener") else False
         self.closer: bool = True if kwargs.get("closer") else False
         self.ue: bool = True if kwargs.get("UE") else False
+        self.in_counter: "Counter[Character]" = Counter()  # Track drawing for combiners
 
     @property
     def loopers(self) -> "Set[Character]":
@@ -485,6 +416,7 @@ class EventBase(StoryElement, abc.ABC):
 
     def add_character(self, c: "Character", /):
         self.attendees[c] += 1
+        self.in_counter[c] += 1
 
 
 class EventAnchor(EventBase):
@@ -508,6 +440,10 @@ class EventAnchor(EventBase):
                 )
                 for p in tl.places
             }
+
+    @property
+    def cluster_name(self) -> str:
+        return f"cluster-{self.counter}"
 
     def make_cluster(self, g_dir: str = "LR") -> gv.Digraph:
         ga: Dict[str, str] = {
@@ -535,7 +471,7 @@ class EventAnchor(EventBase):
             ga["color"] = f"#FFFFFF33:{color}"
             na["shape"] = "octagon"
             na["color"] = f"{color}:#EDEDED99"
-        c = gv.Digraph(name=f"cluster-{self.counter}", graph_attr=ga)
+        c = gv.Digraph(name=self.cluster_name, graph_attr=ga)
         for v in self.child_events:
             na["tooltip"] = v.tooltip_txt
             na["URL"] = v.tooltip_js
@@ -604,12 +540,136 @@ class Event(EventBase):
 
 EventType = TypeVar("EventType", bound=EventBase)
 LineType = TypeVar("LineType", bound=TimedEventSequence)
+ESType = TypeVar("ESType", bound=EventConnector)
+
+
+class EventBridge:
+    def __init__(
+        self,
+        seq: ESType,
+        index: int,
+        past: EventType,
+        future: EventType,
+        dash: bool = False,
+        show_name: bool = True,
+        show_number: bool = True,
+        display_attrs: Dict[str, str] = None,
+    ):
+        self.seq = seq
+        self.index = index
+        self.past = past
+        self.future = future
+        self.dash = dash
+        self.show_name = show_name
+        self.show_number = show_number
+        self.display_attrs = display_attrs if display_attrs else {}
+        self.child_bridges: "List[EventBridge]" = []
+
+    def line_str(self, show_name: bool = True, show_number: bool = True) -> str:
+        return (self.seq.short_name if show_name else "") + (
+            f"-{self.index}" if show_number else ""
+        )
+
+    @property
+    def child_bridge_by_char(self) -> "Dict[ESType, EventBridge]":
+        return {b.seq: b for b in self.child_bridges}
+
+    @property
+    def dash_link(self) -> bool:
+        if not self.child_bridges:
+            return self.dash
+        return any(c.dash for c in self.child_bridges)
+
+    def __repr__(self):
+        return f"{self.index} Bridge from {self.past} to {self.future} for {self.seq}"
+
+    def draw_line(
+        self, g: gv.Digraph, color_labels: bool = True, **override_attrs
+    ) -> None:
+        # inherent attributes
+        attrs = deepcopy(self.display_attrs)
+        for x in override_attrs:  # manual overrides
+            attrs[x] = override_attrs[x]  # can be a one-line in 3.9
+
+        # default properties
+        if not attrs.get("style"):
+            if self.dash_link:
+                attrs["style"] = "dashed"
+        if not attrs.get("label"):
+            attrs["label"] = self.line_str(self.show_name, self.show_number)
+        if not attrs.get("color"):
+            attrs["color"] = self.color
+        if not attrs.get("fontcolor"):
+            attrs["fontcolor"] = self.color if color_labels else ""
+
+        # fancy Timeline rendering
+        if isinstance(self.seq, Timeline):
+            attrs["ltail"] = self.past.cluster_name
+            attrs["lhead"] = self.future.cluster_name
+            attrs["arrowhead"] = "lvee" if self.index % 2 else "rvee"
+
+        # SVG tooltips for combined lines
+        if len(self.child_bridges) > 1:
+            attrs["labeltooltip"] = "\n\t".join(
+                [f"{self.past.name} -> {self.future.name}: {attrs['label']}"]
+                + [b.line_str() for b in self.child_bridges]
+            )
+            if not attrs.get("URL"):
+                attrs["URL"] = StoryElement.jsa(attrs["labeltooltip"])
+
+        # assign estimated straightness
+        if "weight" not in attrs.keys():
+            attrs["weight"] = str(self.weight)
+
+        # draw the edge on the graph
+        try:
+            g.edge(self.past.node_name, self.future.node_name, **attrs)
+        except TypeError:
+            click.echo(attrs, err=True)
+
+    @property
+    def weight(self) -> int:
+        if isinstance(self.seq, Timeline):
+            return 123
+        if isinstance(self.seq, Place):
+            return 69
+        w: int = 10 * len(self.child_bridges) + 7
+        if self.dash_link:
+            return round(w / 9)
+        return w
+
+    def modify_display_attrs(self, **da):
+        for attr in da:
+            self.display_attrs[attr] = da[attr]
+
+    def add_cluster_endings(self) -> None:
+        self.modify_display_attrs(
+            ltail=self.past.cluster_name,
+            lhead=self.future.cluster_name,
+            arrowhead="lvee" if self.index % 2 else "rvee",
+        )
+
+    def add_to_story_queue(self) -> None:
+        self.seq.story.links2process[self.past, self.future].append(self)
+
+    @property
+    def color(self) -> str:
+        return self.seq.color
 
 
 class Character(EventSequence):
     def __init__(self, s: "Storyboard", name: str, *event_list: str, **kwargs):
+        assert (
+            name not in s.dramatis_personae.keys()
+        ), f"A character named {name} already exists"
         super().__init__(name, s, **kwargs)
-        self.story.dramatis_personae.add(self)
+        s.dramatis_personae[name] = self
+        Combiner(s, name, self)
+        if self.short_name != self.name:
+            assert (
+                self.short_name not in s.dramatis_personae.keys()
+            ), f"{self.short_name} is already taken as a character (short)name"
+            s.dramatis_personae[self.short_name] = self
         for e in event_list:
             e = e.strip().lower()
             if not e:
@@ -704,7 +764,46 @@ class Character(EventSequence):
         return sum(meeting_list), len([i for i in meeting_list if i > 0])
 
 
-class Storyboard(StoryElement):
+class Combiner(Set[Character], EventConnector):
+    def __init__(
+        self, s: "Storyboard", name: str, *chars: Union[Character, str], **kwargs
+    ):
+        self.chars = frozenset(
+            c if isinstance(c, Character) else s.dramatis_personae[c] for c in chars
+        )
+        EventConnector.__init__(self, name, s, **kwargs)
+        if len(chars) == 1:  # called from the Character.__init__
+            self.color = chars[0].color
+            self.short_name = chars[0].short_name
+        assert (
+            self.chars not in s.grouped_roster.keys()
+        ), f"A combiner with {chars} already exists"
+        s.grouped_roster[self.chars] = self
+
+    @property
+    def roster(self) -> "Set[Character]":
+        return set(self.chars)
+
+    @staticmethod
+    def size_key(c: "Combiner") -> int:
+        return -len(c)
+
+    def build_bridges(self) -> None:
+        """
+        Generates index numbers for all bridges
+        """
+        if len(self.chars) == 1:
+            for b in self.bridges:
+                b.index = b.child_bridges[0].index
+            return
+        index_char: Character = sorted(self.chars, key=lambda c: len(c.events))[-1]
+        for x, b in enumerate(
+            sorted(self.bridges, key=lambda z: z.child_bridge_by_char[index_char].index)
+        ):
+            b.index = x + 1
+
+
+class Storyboard(EventConnector):
     def __init__(
         self,
         *,
@@ -722,15 +821,15 @@ class Storyboard(StoryElement):
         # set up all the blank variables
         self.line_list: Dict[str, LineType] = {}
         self.event_list: Dict[str, Event] = {}
-        self.dramatis_personae: Set[Character] = set()
         self.is_final: bool = False
         self.line_loaders: Dict[str, Callable] = {
             "TIMELINE": self.create_timeline,
             "EVENT": self.create_event,
             "CHARACTER": self.create_character,
-            "COMMENT": self.comment,
+            "COMMENT": self.create_comment,
+            "COMBINER": self.create_combiner,
         }
-        self.edge_iterator: int = 0
+        self.dramatis_personae: Dict[str, Character] = {}
         self.graph = gv.Digraph(name=self.name)
         self.graph.attr(compound="True", **g_attr)
         self.timelines: Set[Timeline] = set()
@@ -742,6 +841,10 @@ class Storyboard(StoryElement):
             strict=True,
             graph_attr={"fontname": "signature"},
         )
+        self.links2process: DefaultDict[
+            Tuple[EventType, EventType], List[EventBridge]
+        ] = defaultdict(lambda: [])
+        self.grouped_roster: Dict[FrozenSet[Character], Combiner] = {}
 
         if not file:
             return
@@ -782,9 +885,43 @@ class Storyboard(StoryElement):
             else:
                 EventAnchor(f"{t.name} start", t, t.timestamps[0] - 1, opener=True)
                 EventAnchor(f"{t.name} finish", t, t.timestamps[-1] + 1, closer=True)
-        for t in self.line_list.values():
+        for t in set(self.line_list.values()):
             t.sort_events()
+            t.build_bridges()
+        for c in self.roster:
+            c.build_bridges()
+        self.build_bridges()  # more like sort/process bridges
         self.is_final = True
+
+    def build_bridges(self):
+        """This should be called sort_bridges"""
+        for past, future in self.links2process:
+            y = []
+            for bridge in self.links2process[past, future]:
+                if isinstance(bridge.seq, Character):
+                    y.append(bridge)
+                else:
+                    self.bridges.append(bridge)
+            while y:  # convert Character lines into Combiner lines
+                c_out: Combiner = sorted(
+                    [
+                        s
+                        for s in self.grouped_roster.values()
+                        if s.chars <= {b.seq for b in y}
+                    ],
+                    key=lambda s: len(s.chars),
+                )[
+                    -1
+                ]  # find the longest matching Combiner
+                b = EventBridge(c_out, 0, past, future)
+                for c in c_out.chars:
+                    e: EventBridge = [r for r in y if r.seq == c][0]
+                    y.remove(e)
+                    b.child_bridges.append(e)
+                c_out.bridges.append(b)
+        for combo in self.grouped_roster.values():
+            combo.build_bridges()
+            self.bridges.extend(combo.bridges)
 
     @property
     def events(self) -> "List[EventType]":
@@ -814,7 +951,8 @@ class Storyboard(StoryElement):
             [
                 f"{len(self.events)} events",
                 f"\t(sorted into {len(self.timeboxen)} timeboxen)",
-                f"{len(self.dramatis_personae)} characters",
+                f"{len(self.roster)} characters",
+                f"\t({len([k for k in self.grouped_roster.keys() if len(k) > 1])} combined groups)",
                 f"{len(set(self.line_list.values()))} timelines and places",  # always plural
             ]
         )
@@ -834,7 +972,7 @@ class Storyboard(StoryElement):
             "\n".join(
                 [
                     f"{c.name} {'(looper) ' if c.has_loop else ''}meets {Character.lst2str(c.roster)}"
-                    for c in self.dramatis_personae
+                    for c in self.roster
                 ]
             )
         )
@@ -844,7 +982,7 @@ class Storyboard(StoryElement):
         """Converts the loaded data into a graph"""
         if not self.is_final:
             self.finalize()
-        # 1. create timelines
+        # 1. create timelines, timeboxen, and events
         for t in self.timelines:
             self.graph.subgraph(
                 t.make_graph(
@@ -853,16 +991,19 @@ class Storyboard(StoryElement):
                     color_names=self.color_names,
                 )
             )
-        # 2. add characters and make the friendship graph
-        for c in self.dramatis_personae:
-            c.make_edges(self.graph, color_names=self.color_names)
+        # 2. make the friendship graph
+        for c in self.roster:
             c.draw_friendships(self.friendships)
+        # 3. add connecting lines to the graph
+        for b in self.bridges:
+            b.draw_line(self.graph, color_labels=self.color_names)
 
     @property
     def roster(self) -> "Set[Character]":
-        return self.dramatis_personae
+        return set(self.dramatis_personae.values())
 
     def create_timeline(self, name: str, short_name: str, *places: str, **kwargs):
+        places = [p for p in places if p]
         t = Timeline(
             self, name if places else f"{name}-tl", short_name=short_name, **kwargs,
         )
@@ -888,9 +1029,13 @@ class Storyboard(StoryElement):
         return Character(self, name, *events, short_name=short_name, **kwargs)
 
     @staticmethod
-    def comment(*args, **kwargs):
+    def create_comment(*args, **kwargs):
         """Skips a comment without throwing an error"""
         pass
+
+    def create_combiner(self, name: str, short_name: str, *chars: str, **kwargs):
+        assert len(chars) > 1, f"Cannot create combiner {name}: too few characters."
+        return Combiner(self, name, *chars, short_name=short_name, **kwargs)
 
 
 @click.command()

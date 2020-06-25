@@ -9,7 +9,8 @@ Event	Crystal Empire Liberated	pink	10030269	Crystal Empire
 Event	Browsing the archives		10022020	Canterlot
 Event	Teleport to past		10022021	Canterlot
 Event	Back in Canterlot		10022022	Canterlot
-Character	Twilight Sparkle	Purple	TS	NMM-return-Ponyville	Discord-Canterlot	Discord-Ponyville	Twilight meets herself	Browsing the archives
-Character	Future Twilight	#441155	FT	browsing the archives	teleport to past-(	twilight meets herself	)-back in Canterlot	crystal empire liberated
+Character	Twilight Sparkle	Purple	TS	NMM-return-Ponyville	Discord-Canterlot	Discord-Ponyville	Twilight meets herself	Browsing the archives	teleport to past-(	twilight meets herself	)-back in Canterlot	crystal empire liberated
+Character	Torn Cat Suit	#441155	SCS	browsing the archives	teleport to past-(	twilight meets herself	)-back in Canterlot
+Combiner	Future Twilight	#441155	FT	Twilight Sparkle	Torn Cat Suit
 Character	Test NMM	BLACK	NMM	NMM-return-Ponyville	NMM-return-Ponyville
 Comment	Nightmare Moon's self-loop is here to demonstrate a self-loop in the output layer
