@@ -730,11 +730,17 @@ class Character(EventSequence):
         t += " (looper)" if self.has_loop else ""
         u = self.jsa(
             (
-                f"{n} meets {', '.join({x.name for x in self.roster})}"
+                (
+                    f"{n} meets\n➡"
+                    + "\n➡".join(
+                        f"{x.name}\t({self.count_meetings(x)[0]} times)"
+                        for x in self.roster
+                    )
+                )
                 if self.roster
                 else f"{n} is lonely"
             )
-            + f" over {len(set(self.events))} events"
+            + f"\nover {len(set(self.events))} events"
         )
         g.node(
             n, color=c, tooltip=t, shape="signature", URL=u,
@@ -765,7 +771,7 @@ class Character(EventSequence):
                 labelfontname="monospace",
                 labelfontsize="8",
                 URL=self.jsa(
-                    tt + ":\n" + "\n➡".join(n.name for n in self.shared_events(r))
+                    tt + ":\n➡" + "\n➡".join(n.name for n in self.shared_events(r))
                 ),
             )
 
