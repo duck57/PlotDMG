@@ -57,7 +57,10 @@ TYPE: Object
 Synonym for Character
 
 TYPE: Combiner
-These characters will share a line when traveling between the same events
+These characters (or objects) will share a line when traveling between the same events
+Priority is given to the longest combiner that will fit.
+If multiple combiners of the same length could be applied to a set of parallel travelers,
+    the one listed later in the input file takes precedence
 :args (2 or more required)
     list of character names to combine
 :
@@ -795,6 +798,7 @@ class Combiner(Set[Character], EventConnector):
             self.chars not in s.grouped_roster.keys()
         ), f"A combiner with {chars} already exists"
         s.grouped_roster[self.chars] = self
+        self.priority: int = kwargs.get("num", 0)
 
     @property
     def roster(self) -> "Set[Character]":
@@ -802,7 +806,7 @@ class Combiner(Set[Character], EventConnector):
 
     @staticmethod
     def size_key(c: "Combiner") -> int:
-        return -len(c)
+        return len(c.chars) * 1000 + c.priority
 
     def build_bridges(self) -> None:
         """
@@ -872,8 +876,9 @@ class Storyboard(EventConnector):
 
     def load_file(self, file, /):
         f = csv.DictReader(open(file, "r"), delimiter="\t")
+        l: int = 0
         for line in f:
-            if not line["TYPE"]:
+            if not line["TYPE"].strip():
                 continue  # skip blank lines without throwing an error
             fn: Callable = self.line_loaders.get(line["TYPE"].upper().strip())
             if not fn:
@@ -881,7 +886,13 @@ class Storyboard(EventConnector):
                 continue
             color: Optional[str] = line["COLOR"].strip() if line["COLOR"] else None
             everything_else: List[str] = line.get(None, [])  # noqa
-            fn(line["NAME"], line["SHORTNAME"], *everything_else, color=color)
+            fn(
+                line["NAME"],
+                line["SHORTNAME"],
+                *everything_else,
+                color=color,
+                num=(l := l + 1),
+            )
 
     @property
     def nested_lines(self) -> "Dict[Timeline, Set[Place]]":
@@ -926,7 +937,7 @@ class Storyboard(EventConnector):
                         for s in self.grouped_roster.values()
                         if s.chars <= {b.seq for b in y}
                     ],
-                    key=lambda s: len(s.chars),
+                    key=Combiner.size_key,
                 )[
                     -1
                 ]  # find the longest matching Combiner
