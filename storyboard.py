@@ -8,6 +8,10 @@ Package to generate plot diagrams from TSV files
 
 ---------
 
+Output can be cleaned up with 'rm *.gv*'
+
+---------
+
 .tsv expectations
 
 Header row:
@@ -1001,16 +1005,6 @@ class Storyboard(EventConnector):
             except ValueError:
                 click.echo(f"Skipping invalid format {f}", err=True)
                 continue
-        f = open(f"{self.name}.gvroster.txt", "w")
-        f.write(
-            "\n".join(
-                [
-                    f"{c.name} {'(looper) ' if c.has_loop else ''}meets {Character.lst2str(c.roster)}"
-                    for c in self.roster
-                ]
-            )
-        )
-        f.close()
 
     def make_graph(self) -> None:
         """Converts the loaded data into a graph"""
