@@ -5,7 +5,6 @@
 
 """
 Package to generate plot diagrams from TSV files
-The output is a directed multigraph
 
 ---------
 
@@ -39,17 +38,23 @@ Event names must be globally-unique
     Timestamps should be unique for each Place
 :args (1 required)
 Name of the Timeline or Place where the event occurs
-    Placing an event on a Timeline acts as a simultaneity marker
-    (cannot be directly accessed by characters)
+    Placing an event on a Timeline creates child events for all Places within the Timeline
+Adding a second arg will suppress the Event from being considered when drawing
+the friendship graph.  This is useful for heavily-populated events that obscure,
+rather than highlight, character connections.
 :
 
 TYPE: Character
 Someone who moves between Events
+If the last character of the name is '*', the character is skipped on the friendship graph
 :args a list of Events
 Dashed connections
     append -( to an event name to dash to next event
     prefix )- to an event name to dash from previous event
 :
+
+TYPE: Object
+Synonym for Character
 
 TYPE: Combiner
 These characters will share a line when traveling between the same events
@@ -282,7 +287,6 @@ class Timeline(TimedEventSequence):
         self,
         direction: str = "LR",
         *,
-        universal_clock: bool = True,
         only_one: bool = False,
         color_names: bool = False,
     ) -> gv.Digraph:
@@ -377,10 +381,10 @@ class EventBase(StoryElement, abc.ABC):
         self.attendees: "Counter[Character]" = Counter()
         self.entrances: "Set[Character]" = set()
         self.exits: "Set[Character]" = set()
-        self.opener: bool = True if kwargs.get("opener") else False
-        self.closer: bool = True if kwargs.get("closer") else False
-        self.ue: bool = True if kwargs.get("UE") else False
-        self.in_counter: "Counter[Character]" = Counter()  # Track drawing for combiners
+        self.opener: bool = kwargs.get("opener", False)
+        self.closer: bool = kwargs.get("closer", False)
+        self.ue: bool = kwargs.get("UE", False)
+        self.skip_in_friendship_graph: bool = kwargs.get("vegan", not self.can_attend)
 
     @property
     def loopers(self) -> "Set[Character]":
@@ -392,6 +396,8 @@ class EventBase(StoryElement, abc.ABC):
     @property
     def tooltip_txt(self) -> str:
         o: str = super().tooltip_txt
+        if o and self.skip_in_friendship_graph:
+            o += "**"
         if not self.ue:
             o = o.replace(self.name, f"{self.name} [{self.line.name}]")
         if self.entrances:
@@ -400,6 +406,8 @@ class EventBase(StoryElement, abc.ABC):
             o += "\n🛫Departures: " + Character.lst2str(self.exits)
         if self.loopers:
             o += "\n➰Loopers: " + Character.lst2str(self.loopers)
+        if o and self.skip_in_friendship_graph:
+            o += "\n** = skipped when drawing lines on the friendship graph"
         return o
 
     @property
@@ -416,7 +424,6 @@ class EventBase(StoryElement, abc.ABC):
 
     def add_character(self, c: "Character", /):
         self.attendees[c] += 1
-        self.in_counter[c] += 1
 
 
 class EventAnchor(EventBase):
@@ -433,10 +440,11 @@ class EventAnchor(EventBase):
         if self.opener or self.closer:
             self.color = self.line.color
         self.child_events: "Set[Event]" = set()
+        kwargs.pop("color", None)
         if make_related:
-            self.child_events |= {  # this unnecessary set union is to make the linter shut up
+            self.child_events |= {
                 Event(
-                    f"{name}-{p.name}", p, counter, color=kwargs.get("color"), UE=True
+                    f"{name}-{p.name}", p, counter, color=self.color, UE=True, **kwargs
                 )
                 for p in tl.places
             }
@@ -467,18 +475,23 @@ class EventAnchor(EventBase):
             ga["color"] = f"{color}:#FFFFFF33"
             na["shape"] = "egg"
             na["color"] = f"#EDEDED99:{color}"
-        if self.closer:
+        elif self.closer:
             ga["color"] = f"#FFFFFF33:{color}"
             na["shape"] = "octagon"
             na["color"] = f"{color}:#EDEDED99"
+        else:
+            na["color"] = color
         c = gv.Digraph(name=self.cluster_name, graph_attr=ga)
         for v in self.child_events:
+            use_event_color = v.color and not (self.opener or self.closer)
             na["tooltip"] = v.tooltip_txt
             na["URL"] = v.tooltip_js
-            if v.color:  # for events with a custom color
+            if use_event_color:
                 na["color"] = v.color
             c.node(v.node_name, **na)
-            if v.color:  # clear color so it doesn't bleed over into other events
+            if (
+                use_event_color
+            ):  # clear color so it doesn't bleed over into other events
                 na.pop("color", "Blue")
         c.node(self.node_name, shape="point", style="invis")
         return c
@@ -494,6 +507,7 @@ class Event(EventBase):
     ):
         super().__init__(name, tl, counter, **kwargs)
         kwargs.pop("color", None)  # don't infect other nodes with your color
+        kwargs.pop("vegan", None)
         self.anchor = (
             tl.timeline.ts[counter]
             if counter in tl.timeline.ts.keys()
@@ -510,22 +524,6 @@ class Event(EventBase):
     def add_character(self, c: "Character", /):
         super().add_character(c)
         self.anchor.add_character(c)
-
-    @property
-    def opener(self) -> bool:
-        return self.anchor.opener
-
-    @opener.setter
-    def opener(self, x: bool) -> None:
-        pass  # this is set by the anchor event
-
-    @property
-    def closer(self) -> bool:
-        return self.anchor.closer
-
-    @closer.setter
-    def closer(self, x: bool) -> None:
-        pass  # this is set by the anchor event
 
     @property
     def can_attend(self) -> bool:
@@ -662,6 +660,11 @@ class Character(EventSequence):
         assert (
             name not in s.dramatis_personae.keys()
         ), f"A character named {name} already exists"
+        if name[-1] == "*":
+            self.skip_in_friendship_graph = True
+            name = name[:-1]
+        else:
+            self.skip_in_friendship_graph = False
         super().__init__(name, s, **kwargs)
         s.dramatis_personae[name] = self
         Combiner(s, name, self)
@@ -696,6 +699,14 @@ class Character(EventSequence):
         """This is the list of characters met along the way"""
         return super().roster - (set() if self.has_loop else {self})
 
+    @property
+    def mod_roster(self) -> "Set[Character]":
+        ros: "Set[Character]" = set()
+        for e in self.events:
+            if not e.skip_in_friendship_graph:
+                ros |= {c for c in e.roster if not c.skip_in_friendship_graph}
+        return ros - (set() if self.has_loop else {self})
+
     def add_event(self, e: "Event", dash_b4: bool = False, dash_next: bool = False):
         assert e.can_attend, f"{self} cannot attend a synchronization marker, {e}"
         super().add_event(e, dash_b4, dash_next)
@@ -707,6 +718,8 @@ class Character(EventSequence):
         return ", ".join(c.name for c in a)
 
     def draw_friendships(self, g: gv.Graph) -> None:
+        if self.skip_in_friendship_graph:
+            return
         n = self.name
         dc = "#111111"
         c = self.color if self.color else dc
@@ -726,14 +739,13 @@ class Character(EventSequence):
         general_args: Dict[str, str] = {
             "penwidth": "2",
         }
-        for r in self.roster:
+        for r in self.mod_roster:
             x = r.color if r.color else dc
             rn = r.name
             color = f"{c}:{x}"
             d = ""
             m, e = self.count_meetings(r)
-            w = str(m)
-            tt = f"{n}--{rn}\nMeet {m} times over {e} events"
+            tt = f"{n}--{rn}\nMeet {m} times"
             if r == self:
                 if not m:
                     continue
@@ -745,13 +757,17 @@ class Character(EventSequence):
                 **general_args,
                 color=color,
                 dir=d,
-                tooltip=tt,
-                weight="0" if r == self else w,
-                # label=w,  # this makes things too cluttered
+                tooltip=tt + f" over {e} events",
+                weight="0" if r == self else str(m),
                 labelfontname="monospace",
                 labelfontsize="8",
-                URL=self.jsa(tt),
+                URL=self.jsa(
+                    tt + ":\n" + "\n➡".join(n.name for n in self.shared_events(r))
+                ),
             )
+
+    def shared_events(self, c: "Character") -> Set[Event]:
+        return {e for e in self.events if e.attendees[c] > (1 if c == self else 0)}
 
     def count_meetings(self, c: "Character") -> Tuple[int, int]:
         """
@@ -828,6 +844,7 @@ class Storyboard(EventConnector):
             "CHARACTER": self.create_character,
             "COMMENT": self.create_comment,
             "COMBINER": self.create_combiner,
+            "OBJECT": self.create_character,
         }
         self.dramatis_personae: Dict[str, Character] = {}
         self.graph = gv.Digraph(name=self.name)
@@ -1019,6 +1036,8 @@ class Storyboard(EventConnector):
             tl := args[0].lower().strip()
         ) in self.line_list.keys(), f"{tl} isn't a real place"
         line = self.line_list[tl]
+        if len(args) > 1 and args[1]:
+            kwargs["vegan"] = True  # pun on "no meet"
         return (
             Event(name, line, int(timestamp), **kwargs)
             if isinstance(line, Place)
