@@ -118,6 +118,7 @@ class StoryElement(abc.ABC):
             return m
         m = m.replace("\n", "\\n")
         m = m.replace("'", "\\'")
+        m = m.replace("&", "&amp;")
         return f"javascript:alert('{m}');"
 
     def __str__(self):
@@ -896,13 +897,16 @@ class Storyboard(EventConnector):
                 continue
             color: Optional[str] = line["COLOR"].strip() if line["COLOR"] else None
             everything_else: List[str] = line.get(None, [])  # noqa
-            fn(
-                line["NAME"],
-                line["SHORTNAME"],
-                *everything_else,
-                color=color,
-                num=(l := l + 1),
-            )
+            try:
+                fn(
+                    line["NAME"],
+                    line["SHORTNAME"],
+                    *everything_else,
+                    color=color,
+                    num=(l := l + 1),
+                )
+            except (KeyError, AssertionError) as e:
+                assert False, f"{e}\n{num}\t{line}"
 
     @property
     def nested_lines(self) -> "Dict[Timeline, Set[Place]]":
