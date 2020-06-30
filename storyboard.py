@@ -44,8 +44,10 @@ Event names must be globally-unique
 Name of the Timeline or Place where the event occurs
     Placing an event on a Timeline creates child events for all Places within the Timeline
 Adding a second arg will suppress the Event from being considered when drawing
-the friendship graph.  This is useful for heavily-populated events that obscure,
-rather than highlight, character connections.
+    the friendship graph.  This is useful for heavily-populated events that
+    obscure, rather than highlight, character connections.
+A third arg, if included, gives the event a dashed/dotted outline.
+    This is useful to highlight an event of uncertain ordering or inclusion in the narrative.
 :
 
 TYPE: Character
@@ -166,13 +168,16 @@ class EventSequence(EventConnector, abc.ABC):
         show_number: bool = True,
         da: Dict[str, str] = None,
         add_now: bool = True,
+        dash_style: str = "dashed",
     ) -> None:
         if not da:
             da = {}
         for i in range(1, len(self.e_lst)):
             past, future = self.e_lst[i - 1].event, self.e_lst[i].event
             dash = self.e_lst[i - 1].dash_to_next or self.e_lst[i].dash_from_previous
-            x = EventBridge(self, i, past, future, dash, show_name, show_number, da)
+            x = EventBridge(
+                self, i, past, future, dash, show_name, show_number, da, dash_style
+            )
             self.bridges.append(x)
         if add_now:  # you need to do this manually in the overriding method if False
             self.add_links_to_story()
@@ -352,11 +357,9 @@ class Place(TimedEventSequence):
     def build_bridges(
         self, show_name: bool = False, show_number: bool = False, **da
     ) -> None:
-        if not da.get("style"):
-            da["style"] = "dotted"
         if not da.get("arrowhead"):
             da["arrowhead"] = "onormal"
-        super().build_bridges(show_name, show_number, da)
+        super().build_bridges(show_name, show_number, da, dash_style="dotted")
 
     @property
     def tooltip_txt(self) -> str:
@@ -461,6 +464,10 @@ class EventAnchor(EventBase):
     def cluster_name(self) -> str:
         return f"cluster-{self.counter}"
 
+    @property
+    def dash(self) -> bool:
+        return all(e.dash for e in self.child_events)
+
     def make_cluster(self, g_dir: str = "LR") -> gv.Digraph:
         ga: Dict[str, str] = {
             "label": f"{self.counter}",
@@ -471,6 +478,8 @@ class EventAnchor(EventBase):
             "tooltip": self.tooltip_txt,
             "URL": self.tooltip_js,
         }
+        if self.dash:
+            ga["style"] = "dashed"
         color: str = self.line.color if self.line.color else "#00000088"
         na: Dict[str, str] = {}
         if self.opener or self.closer:
@@ -496,6 +505,8 @@ class EventAnchor(EventBase):
             na["URL"] = v.tooltip_js
             if use_event_color:
                 na["color"] = v.color
+            if v.dash:
+                na["style"] = "dotted"
             c.node(v.node_name, **na)
             if (
                 use_event_color
@@ -516,6 +527,7 @@ class Event(EventBase):
         super().__init__(name, tl, counter, **kwargs)
         kwargs.pop("color", None)  # don't infect other nodes with your color
         kwargs.pop("vegan", None)
+        self.dash = kwargs.pop("dash", False)
         self.anchor = (
             tl.timeline.ts[counter]
             if counter in tl.timeline.ts.keys()
@@ -560,6 +572,7 @@ class EventBridge:
         show_name: bool = True,
         show_number: bool = True,
         display_attrs: Dict[str, str] = None,
+        dash_type: str = "dashed",
     ):
         self.seq = seq
         self.index = index
@@ -570,6 +583,7 @@ class EventBridge:
         self.show_number = show_number
         self.display_attrs = display_attrs if display_attrs else {}
         self.child_bridges: "List[EventBridge]" = []
+        self.dash_type = dash_type
 
     def line_str(self, show_name: bool = True, show_number: bool = True) -> str:
         return (self.seq.short_name if show_name else "") + (
@@ -598,9 +612,11 @@ class EventBridge:
             attrs[x] = override_attrs[x]  # can be a one-line in 3.9
 
         # default properties
-        if not attrs.get("style"):
-            if self.dash_link:
-                attrs["style"] = "dashed"
+        if self.dash_link:
+            if attrs.get("style"):
+                attrs["style"] += f",{self.dash_type}"
+            else:
+                attrs["style"] = self.dash_type
         if not attrs.get("label"):
             attrs["label"] = self.line_str(self.show_name, self.show_number)
         if not attrs.get("color"):
@@ -649,11 +665,15 @@ class EventBridge:
             self.display_attrs[attr] = da[attr]
 
     def add_cluster_endings(self) -> None:
+        """
+        Meant to be run on bridges connecting event anchor clusters
+        """
         self.modify_display_attrs(
             ltail=self.past.cluster_name,
             lhead=self.future.cluster_name,
             arrowhead="lvee" if self.index % 2 else "rvee",
         )
+        self.dash = True if self.past.dash or self.future.dash else False
 
     def add_to_story_queue(self) -> None:
         self.seq.story.links2process[self.past, self.future].append(self)
@@ -906,7 +926,7 @@ class Storyboard(EventConnector):
                     num=(l := l + 1),
                 )
             except (KeyError, AssertionError) as e:
-                assert False, f"{e}\n{num}\t{line}"
+                assert False, f"{e}\n{l}\t{line}"
 
     @property
     def nested_lines(self) -> "Dict[Timeline, Set[Place]]":
@@ -1051,8 +1071,10 @@ class Storyboard(EventConnector):
             tl := args[0].lower().strip()
         ) in self.line_list.keys(), f"{tl} isn't a real place"
         line = self.line_list[tl]
-        if len(args) > 1 and args[1]:
+        if len(args) > 1 and args[1].strip():
             kwargs["vegan"] = True  # pun on "no meet"
+        if len(args) > 2 and args[2].strip():
+            kwargs["dash"] = True
         return (
             Event(name, line, int(timestamp), **kwargs)
             if isinstance(line, Place)
