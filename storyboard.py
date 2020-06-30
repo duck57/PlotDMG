@@ -104,11 +104,30 @@ class StoryElement(abc.ABC):
     def roster(self) -> "Set[Character]":
         pass
 
+    @staticmethod
+    def lst2str(a: "Iterable[StoryElement]") -> str:
+        return ", ".join(c.name for c in a)
+
+    def possible_groups(self, c: "Iterable[Character]") -> "List[Combiner]":
+        chars2match = set(c)  # capture iterator output for looping
+        return sorted(
+            [combo for combo in self.story.grouped_roster if combo <= chars2match],
+            key=Combiner.size_key,
+        )
+
+    def longest_matching_combiner(
+        self, c: "Iterable[Character]"
+    ) -> "Optional[Combiner]":
+        try:
+            return self.possible_groups(c)[-1]
+        except IndexError:
+            return None
+
     @property
     def tooltip_txt(self) -> str:
         if not self.roster:
             return ""
-        return f"{self.name}" + ("\n📒Roster: " + Character.lst2str(self.roster))
+        return f"{self.name}" + ("\n📒Roster: " + self.lst2str(self.roster))
 
     @property
     def tooltip_js(self) -> str:
@@ -419,7 +438,19 @@ class EventBase(StoryElement, abc.ABC):
             o += "\n➰Loopers: " + Character.lst2str(self.loopers)
         if o and self.skip_in_friendship_graph:
             o += "\n** = skipped when drawing lines on the friendship graph"
+        if self.group_attendance:
+            o += "\n\n👥Groups: " + Combiner.lst2str(self.group_attendance)
         return o
+
+    @property
+    def group_attendance(self) -> "List[Combiner]":
+        y: "List[Character]" = list(self.attendees.elements())
+        o: "List[Combiner]" = []
+        while y:  # convert Character lines into Combiner lines
+            o.append(self.longest_matching_combiner(y))
+            for c in o[-1].chars:
+                y.remove(c)
+        return [g for g in o if len(g.chars) > 1]
 
     @property
     def roster(self) -> "Set[Character]":
@@ -741,10 +772,6 @@ class Character(EventSequence):
         # add yourself to the roster of the events you attend
         e.add_character(self)
 
-    @staticmethod
-    def lst2str(a: "Iterable[Character]") -> str:
-        return ", ".join(c.name for c in a)
-
     def draw_friendships(self, g: gv.Graph) -> None:
         if self.skip_in_friendship_graph:
             return
@@ -822,18 +849,23 @@ class Combiner(Set[Character], EventConnector):
             c if isinstance(c, Character) else s.dramatis_personae[c] for c in chars
         )
         EventConnector.__init__(self, name, s, **kwargs)
+        set.__init__(self, self.chars)
         if len(chars) == 1:  # called from the Character.__init__
             self.color = chars[0].color
             self.short_name = chars[0].short_name
-        assert (
-            self.chars not in s.grouped_roster.keys()
-        ), f"A combiner with {chars} already exists"
-        s.grouped_roster[self.chars] = self
+        assert self not in s.grouped_roster, f"A combiner with {chars} already exists"
+        s.grouped_roster.add(self)
         self.priority: int = kwargs.get("num", 0)
 
     @property
     def roster(self) -> "Set[Character]":
         return set(self.chars)
+
+    def __repr__(self):
+        return f"Combiner {self.name} -> {self.chars}"
+
+    def __hash__(self):
+        return self.chars.__hash__()
 
     @staticmethod
     def size_key(c: "Combiner") -> int:
@@ -896,7 +928,7 @@ class Storyboard(EventConnector):
         self.links2process: DefaultDict[
             Tuple[EventType, EventType], List[EventBridge]
         ] = defaultdict(lambda: [])
-        self.grouped_roster: Dict[FrozenSet[Character], Combiner] = {}
+        self.grouped_roster: Set[Combiner] = set()
 
         if not file:
             return
@@ -965,23 +997,14 @@ class Storyboard(EventConnector):
                 else:
                     self.bridges.append(bridge)
             while y:  # convert Character lines into Combiner lines
-                c_out: Combiner = sorted(
-                    [
-                        s
-                        for s in self.grouped_roster.values()
-                        if s.chars <= {b.seq for b in y}
-                    ],
-                    key=Combiner.size_key,
-                )[
-                    -1
-                ]  # find the longest matching Combiner
+                c_out = self.longest_matching_combiner(b.seq for b in y)
                 b = EventBridge(c_out, 0, past, future)
                 for c in c_out.chars:
                     e: EventBridge = [r for r in y if r.seq == c][0]
                     y.remove(e)
                     b.child_bridges.append(e)
                 c_out.bridges.append(b)
-        for combo in self.grouped_roster.values():
+        for combo in self.grouped_roster:
             combo.build_bridges()
             self.bridges.extend(combo.bridges)
 
@@ -1014,7 +1037,7 @@ class Storyboard(EventConnector):
                 f"{len(self.events)} events",
                 f"\t(sorted into {len(self.timeboxen)} timeboxen)",
                 f"{len(self.roster)} characters",
-                f"\t({len([k for k in self.grouped_roster.keys() if len(k) > 1])} combined groups)",
+                f"\t({len([k for k in self.grouped_roster if len(k) > 1])} combined groups)",
                 f"{len(set(self.line_list.values()))} timelines and places",  # always plural
             ]
         )
