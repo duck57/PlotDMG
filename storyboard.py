@@ -315,6 +315,16 @@ class Timeline(TimedEventSequence):
     def __repr__(self):
         return f"Timeline {self.name}"
 
+    def add_cap(self) -> None:
+        if not self.timestamps:
+            EventAnchor(f"empty-{self.name}-start", self, -1, opener=True)
+            EventAnchor(f"empty-{self.name}-finish", self, 1, closer=True)
+        else:
+            EventAnchor(f"{self.name} start", self, self.timestamps[0] - 1, opener=True)
+            EventAnchor(
+                f"{self.name} finish", self, self.timestamps[-1] + 1, closer=True
+            )
+
     def make_graph(
         self,
         direction: str = "LR",
@@ -348,9 +358,9 @@ class Timeline(TimedEventSequence):
             da["fontname"] = "sans italic"
         if not da.get("minlen"):
             da["minlen"] = "1"
+        if not da.get("arrowhead"):
+            da["arrowhead"] = "vee"
         super().build_bridges(show_name, show_number, da, add_now=False)
-        for b in self.bridges:
-            b.add_cluster_endings()
         self.add_links_to_story()
 
 
@@ -457,7 +467,7 @@ class EventBase(StoryElement, abc.ABC):
         return set(self.attendees)
 
     @property
-    def node_name(self) -> str:
+    def node_label(self) -> str:
         return self.name.replace("-", "\n")
 
     @staticmethod
@@ -483,6 +493,7 @@ class EventAnchor(EventBase):
             self.color = self.line.color
         self.child_events: "Set[Event]" = set()
         kwargs.pop("color", None)
+        self.universal: bool = make_related
         if make_related:
             self.child_events |= {
                 Event(
@@ -498,6 +509,12 @@ class EventAnchor(EventBase):
     @property
     def dash(self) -> bool:
         return all(e.dash for e in self.child_events)
+
+    @property
+    def node_label(self) -> str:
+        if not self.universal:
+            return super().node_label
+        return f"{self.counter}:-{self.name}".replace("-", "\n")
 
     def make_cluster(self, g_dir: str = "LR") -> gv.Digraph:
         ga: Dict[str, str] = {
@@ -529,7 +546,12 @@ class EventAnchor(EventBase):
             na["color"] = f"{color}:#EDEDED99"
         else:
             na["color"] = color
-        c = gv.Digraph(name=self.cluster_name, graph_attr=ga)
+        if self.story.time_style == "LINE":
+            ga["rank"] = "same"
+        c = gv.Digraph(
+            name=self.cluster_name if self.story.time_style == "BOX" else "",
+            graph_attr=ga,
+        )
         for v in self.child_events:
             use_event_color = v.color and not (self.opener or self.closer)
             na["tooltip"] = v.tooltip_txt
@@ -538,12 +560,20 @@ class EventAnchor(EventBase):
                 na["color"] = v.color
             if v.dash:
                 na["style"] = "dotted"
-            c.node(v.node_name, **na)
+            c.node(v.name, v.node_label, **na)
             if (
                 use_event_color
             ):  # clear color so it doesn't bleed over into other events
                 na.pop("color", "Blue")
-        c.node(self.node_name, shape="point", style="invis")
+        ra: Dict[str, str] = {}
+        if self.story.time_style == "BOX":
+            ra["shape"] = "point"
+            ra["style"] = "invis"
+        elif self.story.time_style == "LINE":
+            if ga.get("style"):
+                ra["style"] = ga["style"]
+            ra["shape"] = "rectangle"
+        c.node(self.name, self.node_label, **ra)
         return c
 
 
@@ -563,11 +593,7 @@ class Event(EventBase):
             tl.timeline.ts[counter]
             if counter in tl.timeline.ts.keys()
             else EventAnchor(
-                f"{self.line.short_name}-{counter}",
-                self.line.timeline,
-                counter,
-                False,
-                **kwargs,
+                f"{counter}", self.line.timeline, counter, False, **kwargs,
             )
         )
         self.anchor.child_events.add(self)
@@ -642,6 +668,14 @@ class EventBridge:
         for x in override_attrs:  # manual overrides
             attrs[x] = override_attrs[x]  # can be a one-line in 3.9
 
+        # fancy Timeline rendering
+        if isinstance(self.seq, Timeline):
+            if self.seq.story.time_style == "BOX":
+                attrs["ltail"] = self.past.cluster_name
+                attrs["lhead"] = self.future.cluster_name
+                attrs["arrowhead"] = "lvee" if self.index % 2 else "rvee"
+            self.dash = True if self.past.dash or self.future.dash else False
+
         # default properties
         if self.dash_link:
             if attrs.get("style"):
@@ -654,12 +688,6 @@ class EventBridge:
             attrs["color"] = self.color
         if not attrs.get("fontcolor"):
             attrs["fontcolor"] = self.color if color_labels else ""
-
-        # fancy Timeline rendering
-        if isinstance(self.seq, Timeline):
-            attrs["ltail"] = self.past.cluster_name
-            attrs["lhead"] = self.future.cluster_name
-            attrs["arrowhead"] = "lvee" if self.index % 2 else "rvee"
 
         # SVG tooltips for combined lines
         if len(self.child_bridges) > 1:
@@ -676,7 +704,7 @@ class EventBridge:
 
         # draw the edge on the graph
         try:
-            g.edge(self.past.node_name, self.future.node_name, **attrs)
+            g.edge(self.past.name, self.future.name, **attrs)
         except TypeError:
             click.echo(attrs, err=True)
 
@@ -690,21 +718,6 @@ class EventBridge:
         if self.dash_link:
             return round(w / 9)
         return w
-
-    def modify_display_attrs(self, **da):
-        for attr in da:
-            self.display_attrs[attr] = da[attr]
-
-    def add_cluster_endings(self) -> None:
-        """
-        Meant to be run on bridges connecting event anchor clusters
-        """
-        self.modify_display_attrs(
-            ltail=self.past.cluster_name,
-            lhead=self.future.cluster_name,
-            arrowhead="lvee" if self.index % 2 else "rvee",
-        )
-        self.dash = True if self.past.dash or self.future.dash else False
 
     def add_to_story_queue(self) -> None:
         self.seq.story.links2process[self.past, self.future].append(self)
@@ -894,6 +907,7 @@ class Storyboard(EventConnector):
         file=None,
         load_final: bool = True,
         g_attr: Optional[Dict[str, str]] = None,
+        time_style: str = "BOX",
         **kwargs,
     ):
         assert name or file, f"Need a name or a file to load from"
@@ -929,6 +943,7 @@ class Storyboard(EventConnector):
             Tuple[EventType, EventType], List[EventBridge]
         ] = defaultdict(lambda: [])
         self.grouped_roster: Set[Combiner] = set()
+        self.time_style = time_style.strip().upper()
 
         if not file:
             return
@@ -973,12 +988,7 @@ class Storyboard(EventConnector):
         if self.is_final:
             return
         for t in self.timelines:
-            if not t.timestamps:
-                EventAnchor(f"empty-{t.name}-start", t, -1, opener=True)
-                EventAnchor(f"empty-{t.name}-finish", t, 1, closer=True)
-            else:
-                EventAnchor(f"{t.name} start", t, t.timestamps[0] - 1, opener=True)
-                EventAnchor(f"{t.name} finish", t, t.timestamps[-1] + 1, closer=True)
+            t.add_cap()
         for t in set(self.line_list.values()):
             t.sort_events()
             t.build_bridges()
@@ -1169,13 +1179,26 @@ class Storyboard(EventConnector):
     is_flag=True,
     help="Names follow their associated line color",
 )
+@click.option(
+    "-t",
+    "--time-style",
+    type=click.Choice(["LINE", "BOX"], case_sensitive=False),
+    default="BOX",
+    help="Anchor simultaneous events to a timeline or group them in a time box?",
+)
 def main(
-    loadfile, rankdir: str, output_list: List[str], quiet: bool, color_names: bool
+    loadfile,
+    rankdir: str,
+    output_list: List[str],
+    quiet: bool,
+    color_names: bool,
+    time_style: str,
 ):
     s = Storyboard(
         file=loadfile,
         g_attr={"rankdir": rankdir.upper().strip()},
         color_names=color_names,
+        time_style=time_style,
     )
     s.output(quiet, output_list)
 

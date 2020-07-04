@@ -11,3 +11,10 @@ example.
 * `./storyboard.py --help` displays more detailed information on command-line
   options, including links to graphviz documentation.
 
+Play around with the `-d` and `-t` options to find the settings that best suit
+your story.
+
+* `-d LR` generally produces better output than `-d TB`, but this varies
+  depending on the line density and looping.
+* `-t line` produces grid-like output compared to `-t box`.
+
