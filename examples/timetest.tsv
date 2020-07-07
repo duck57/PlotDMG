@@ -1,0 +1,10 @@
+TYPE	NAME	COLOR	SHORTNAME
+Comment	The box mode output should have three boxes
+Comment	The world arrow skips the middle box
+Timeline	Somewhere			a-1	b+1	d+69	z
+Event	Zero		0	Somewhere		?	x
+Event	Mystique		6	a			x
+Event	Seven		8	b		?
+Event	set		7~	d		?	x
+Event	seven-but not really		7	d
+Event	MCM		5-2	z			x

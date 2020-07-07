@@ -35,11 +35,18 @@ distant past and far future to be different timelines, even if they are connecte
 :args (at least 1 required) list of place names:
 Timeline and Place names must be globally-unique in a shared pool
 
+~~TIME OFFSETS~~
+The characters +, -, and ~ are reserved for use at the end of Place names and Event.
++ and - denote time offsets.  The offset is relative to the Timeline for Places and
+relative to the Place for events.  Ending an event's time code with ~ means that its
+time counter is made directly on the Timeline's clock and ignores local offsets.
+Think of these as primitive timezones: DST support is out-of-scope.
+
 TYPE: Event
 Something that happened.
 Event names must be globally-unique
 :SHORTNAME Integer timestamp for ordering relative to the rest of the Timeline or Place
-    Timestamps should be unique for each Place
+    Timestamps should be unique for each Place (no overlapping events).
 :args (1 required)
 Name of the Timeline or Place where the event occurs
     Placing an event on a Timeline creates child events for all Places within the Timeline
@@ -48,6 +55,8 @@ Adding a second arg will suppress the Event from being considered when drawing
     obscure, rather than highlight, character connections.
 A third arg, if included, gives the event a dashed/dotted outline.
     This is useful to highlight an event of uncertain ordering or inclusion in the narrative.
+Argument 4, if present for all simultaneous events in a Timeline, skips the time box when
+    drawing arrows in BOX mode.
 :
 
 TYPE: Character
@@ -146,6 +155,35 @@ class StoryElement(abc.ABC):
         return self.name
 
 
+class HasTimeOffset(abc.ABC):
+    def __init__(self, offset: int = 0, **_kwargs):
+        self.local_offset = offset
+
+    @property
+    def total_offset(self) -> int:
+        return self.local_offset
+
+    @property
+    def offset_string(self) -> str:
+        return ("" if self.local_offset < 0 else "+") + str(self.local_offset)
+
+    @staticmethod
+    def separate_tz(raw: str) -> Tuple[str, int]:
+        def r(sep: chr) -> Optional[Tuple[str, int]]:
+            if len(raw) < 3:
+                return None
+            o, pre = raw[1:].split(sep), raw[0]
+            if len(o) > 1:
+                return pre + o[0], int(sep + o[1])
+            return None
+
+        if pos := r("+"):
+            return pos
+        if neg := r("-"):
+            return neg
+        return raw, 0
+
+
 class EventConnector(StoryElement, abc.ABC):
     def __init__(self, name: str, s: "Storyboard", **kwargs):
         super().__init__(name, s, **kwargs)
@@ -188,12 +226,15 @@ class EventSequence(EventConnector, abc.ABC):
         da: Dict[str, str] = None,
         add_now: bool = True,
         dash_style: str = "dashed",
+        events: "Optional[List[EventInSequence]]" = None,
     ) -> None:
         if not da:
             da = {}
-        for i in range(1, len(self.e_lst)):
-            past, future = self.e_lst[i - 1].event, self.e_lst[i].event
-            dash = self.e_lst[i - 1].dash_to_next or self.e_lst[i].dash_from_previous
+        if not events:
+            events = self.e_lst
+        for i in range(1, len(events)):
+            past, future = events[i - 1].event, events[i].event
+            dash = events[i - 1].dash_to_next or events[i].dash_from_previous
             x = EventBridge(
                 self, i, past, future, dash, show_name, show_number, da, dash_style
             )
@@ -256,9 +297,10 @@ class EventInSequence(NamedTuple):
         return self.event.node_name
 
 
-class TimedEventSequence(EventSequence, abc.ABC):
-    def __init__(self, name: str, story: "Storyboard", **kwargs):
-        super().__init__(name, story, **kwargs)
+class TimedEventSequence(EventSequence, HasTimeOffset, abc.ABC):
+    def __init__(self, name: str, story: "Storyboard", offset: int = 0, **kwargs):
+        EventSequence.__init__(self, name, story, **kwargs)
+        HasTimeOffset.__init__(self, offset)
         assert (
             self.key not in story.line_list.keys()
         ), f"{self.name} already is a timeline or place"
@@ -292,7 +334,9 @@ class TimedEventSequence(EventSequence, abc.ABC):
         assert (
             n := e.name.lower().strip()
         ) not in self.story.event_list.keys(), f"Event {n.upper()} already happened"
+        # either - or _ works for manual place separation for universal events
         self.story.event_list[n] = e
+        self.story.event_list[n.replace("_", "-")] = e
         super().add_event(e, dash_b4, dash_next)
         self.ts[e.counter] = e
 
@@ -360,7 +404,13 @@ class Timeline(TimedEventSequence):
             da["minlen"] = "1"
         if not da.get("arrowhead"):
             da["arrowhead"] = "vee"
-        super().build_bridges(show_name, show_number, da, add_now=False)
+        super().build_bridges(
+            show_name,
+            show_number,
+            da,
+            add_now=False,
+            events=[e for e in self.e_lst if not e[0].skip_arrow],
+        )
         self.add_links_to_story()
 
 
@@ -372,7 +422,8 @@ class Place(TimedEventSequence):
     def __init__(
         self, story: "Storyboard", tl: "Timeline", name: str, **kwargs,
     ):
-        super().__init__(name, story, **kwargs)
+        name, offset = HasTimeOffset.separate_tz(name)
+        super().__init__(name, story, offset, **kwargs)
         if self.color is None:
             self.color = tl.color
         self.dash_by_default = True
@@ -395,7 +446,7 @@ class Place(TimedEventSequence):
         return super().tooltip_txt.replace("\n📒Roster: ", "\nVisitors: ")
 
 
-class EventBase(StoryElement, abc.ABC):
+class EventBase(StoryElement, HasTimeOffset, abc.ABC):
     can_attend: bool
     grad_dir: Dict[str, str] = {
         "LR": "0",
@@ -405,7 +456,18 @@ class EventBase(StoryElement, abc.ABC):
     }
 
     def __init__(
-        self, name: str, tl: "LineType", counter: int, **kwargs,
+        self,
+        name: str,
+        tl: "LineType",
+        counter: int,
+        offset: int = 0,
+        absolute: bool = False,
+        opener: bool = False,
+        closer: bool = False,
+        vegan: bool = False,
+        universal: bool = False,
+        box_skip: bool = False,
+        **kwargs,
     ):
         """
         :param name: (Unique) name of event
@@ -413,18 +475,26 @@ class EventBase(StoryElement, abc.ABC):
         :param counter: When did it happen?
         :param kwargs: other stuff
         """
-        super().__init__(name, tl.story, **kwargs)
-        self.name = name
+        self.local_counter: int = 0
+        HasTimeOffset.__init__(self, offset)
+        StoryElement.__init__(self, name, tl.story, **kwargs)
+        self.name = name.replace("-", "_")
         self.line = tl
-        self.counter = counter
+        if absolute:
+            self.counter = counter
+        else:
+            self.local_counter = counter
         self.line.add_event(self)
         self.attendees: "Counter[Character]" = Counter()
         self.entrances: "Set[Character]" = set()
         self.exits: "Set[Character]" = set()
-        self.opener: bool = kwargs.get("opener", False)
-        self.closer: bool = kwargs.get("closer", False)
-        self.ue: bool = kwargs.get("UE", False)
-        self.skip_in_friendship_graph: bool = kwargs.get("vegan", not self.can_attend)
+        self.opener = opener
+        self.closer = closer
+        self.universal_event = universal
+        self.skip_in_friendship_graph = vegan
+        self.no_box = box_skip
+        if vegan:
+            print(name)
 
     @property
     def loopers(self) -> "Set[Character]":
@@ -434,11 +504,27 @@ class EventBase(StoryElement, abc.ABC):
         return f"Event {self.name} at {self.counter} in {self.line}"
 
     @property
+    def counter(self) -> int:
+        return self.local_counter - self.total_offset
+
+    @counter.setter
+    def counter(self, abs_time: int):
+        self.local_counter = abs_time + self.total_offset
+
+    @property
+    def total_offset(self) -> int:
+        return self.local_offset + self.line.local_offset
+
+    @total_offset.setter
+    def total_offset(self, o: int):
+        self.local_offset = o - self.line.local_offset
+
+    @property
     def tooltip_txt(self) -> str:
         o: str = super().tooltip_txt
         if o and self.skip_in_friendship_graph:
             o += "**"
-        if not self.ue:
+        if not self.universal_event:
             o = o.replace(self.name, f"{self.name} [{self.line.name}]")
         if self.entrances:
             o += "\n🛬Entrances: " + Character.lst2str(self.entrances)
@@ -468,7 +554,7 @@ class EventBase(StoryElement, abc.ABC):
 
     @property
     def node_label(self) -> str:
-        return self.name.replace("-", "\n")
+        return self.name.replace("_", "\n")
 
     @staticmethod
     def event_key(e: "EventType") -> int:
@@ -488,16 +574,21 @@ class EventAnchor(EventBase):
     def __init__(
         self, name: str, tl: Timeline, counter: int, make_related: bool = True, **kwargs
     ):
-        super().__init__(name, tl, counter, **kwargs)
+        super().__init__(name, tl, counter, universal=make_related, **kwargs)
         if self.opener or self.closer:
             self.color = self.line.color
         self.child_events: "Set[Event]" = set()
         kwargs.pop("color", None)
-        self.universal: bool = make_related
         if make_related:
             self.child_events |= {
                 Event(
-                    f"{name}-{p.name}", p, counter, color=self.color, UE=True, **kwargs
+                    f"{name}_{p.name}",
+                    p,
+                    self.counter,
+                    color=self.color,
+                    universal=True,
+                    **kwargs,
+                    absolute=True,
                 )
                 for p in tl.places
             }
@@ -512,9 +603,13 @@ class EventAnchor(EventBase):
 
     @property
     def node_label(self) -> str:
-        if not self.universal:
+        if not self.universal_event:
             return super().node_label
         return f"{self.counter}:-{self.name}".replace("-", "\n")
+
+    @property
+    def skip_arrow(self) -> bool:
+        return all(e.no_box for e in self.child_events)
 
     def make_cluster(self, g_dir: str = "LR") -> gv.Digraph:
         ga: Dict[str, str] = {
@@ -555,7 +650,7 @@ class EventAnchor(EventBase):
         for v in self.child_events:
             use_event_color = v.color and not (self.opener or self.closer)
             na["tooltip"] = v.tooltip_txt
-            na["URL"] = v.tooltip_js
+            na["URL"] = v.tooltip_js if v.roster else ""
             if use_event_color:
                 na["color"] = v.color
             if v.dash:
@@ -565,6 +660,8 @@ class EventAnchor(EventBase):
                 use_event_color
             ):  # clear color so it doesn't bleed over into other events
                 na.pop("color", "Blue")
+            if v.dash:
+                na.pop("style", None)
         ra: Dict[str, str] = {}
         if self.story.time_style == "BOX":
             ra["shape"] = "point"
@@ -586,17 +683,25 @@ class Event(EventBase):
         self, name: str, tl: Place, counter: int, **kwargs,
     ):
         super().__init__(name, tl, counter, **kwargs)
-        kwargs.pop("color", None)  # don't infect other nodes with your color
+        # avoid infecting future nodes
+        kwargs.pop("color", None)
         kwargs.pop("vegan", None)
+        kwargs.pop("offset", None)
         self.dash = kwargs.pop("dash", False)
         self.anchor = (
-            tl.timeline.ts[counter]
-            if counter in tl.timeline.ts.keys()
+            tl.timeline.ts[self.counter]
+            if self.counter in tl.timeline.ts.keys()
             else EventAnchor(
-                f"{counter}", self.line.timeline, counter, False, **kwargs,
+                f"{self.counter}", self.line.timeline, self.counter, False, **kwargs,
             )
         )
         self.anchor.child_events.add(self)
+        if self.opener or self.closer:
+            name = tl.name + "_"
+            name += "start_" if self.opener else ""
+            name += "finish_" if self.closer else ""
+            name += f"({tl.offset_string})"
+            self.name = name
 
     def add_character(self, c: "Character", /):
         super().add_character(c)
@@ -608,9 +713,18 @@ class Event(EventBase):
 
     @property
     def tooltip_txt(self) -> str:
-        return (
-            self.line.tooltip_txt if self.opener or self.closer else super().tooltip_txt
-        )
+        if self.opener or self.closer:
+            return self.line.tooltip_txt
+        time_diff: str = ""
+        if self.counter != self.local_counter or self.local_offset:
+            time_diff += f"({self.local_counter} local"
+            if self.local_offset:
+                time_diff += f", shifted by {self.offset_string}"
+            time_diff += ")\n"
+        roster: str = super().tooltip_txt
+        if not roster:
+            roster = self.name
+        return time_diff + roster
 
 
 EventType = TypeVar("EventType", bound=EventBase)
@@ -1024,16 +1138,16 @@ class Storyboard(EventConnector):
         return [e for e in self.event_list.values() if e.can_attend]
 
     @property
-    def timeboxen(self) -> "List[EventType]":
+    def timeboxen(self) -> "Set[EventType]":
         """
         Returns the list of event anchors created by the story
         (ignores the start/stop boxen)
         """
-        return [
+        return {
             e
             for e in self.event_list.values()
             if not e.can_attend and not (e.opener or e.closer)
-        ]
+        }
 
     def output(self, quiet: bool = False, formats: List[str] = None):
         if formats is None:
@@ -1100,14 +1214,19 @@ class Storyboard(EventConnector):
 
     def create_event(self, name: str, timestamp: str, *args: str, **kwargs):
         assert args, f"Insufficient information to create an event: {name} {timestamp}"
-        assert (
-            tl := args[0].lower().strip()
-        ) in self.line_list.keys(), f"{tl} isn't a real place"
+        args = [a.lower().strip() for a in args]
+        assert (tl := args[0]) in self.line_list.keys(), f"{tl} isn't a real place"
         line = self.line_list[tl]
-        if len(args) > 1 and args[1].strip():
+        if len(args) > 1 and args[1]:
             kwargs["vegan"] = True  # pun on "no meet"
-        if len(args) > 2 and args[2].strip():
+        if len(args) > 2 and args[2]:
             kwargs["dash"] = True
+        timestamp, kwargs["offset"] = HasTimeOffset.separate_tz(timestamp)
+        if timestamp[-1] == "~":
+            timestamp = timestamp[:-1]
+            kwargs["absolute"] = True
+        if len(args) > 3 and args[3]:
+            kwargs["box_skip"] = True
         return (
             Event(name, line, int(timestamp), **kwargs)
             if isinstance(line, Place)
